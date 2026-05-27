@@ -1,0 +1,39 @@
+.app-layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.app-layout.dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.sidebar-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.resize-handle {
+  width: 4px;
+  flex-shrink: 0;
+  background: transparent;
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+.resize-handle:hover,
+.app-layout.dragging .resize-handle {
+  background: var(--accent);
+}
+
+.content-panel {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

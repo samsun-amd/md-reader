@@ -1,0 +1,60 @@
+.tree-node {
+  user-select: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  color: var(--text-primary);
+  transition: background 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tree-row:hover {
+  background: var(--bg-hover);
+}
+
+.tree-row.selected {
+  background: var(--selected-bg);
+  color: var(--accent-hover);
+  border-left: 2px solid var(--selected-border);
+  padding-left: calc(var(--indent, 8px) - 2px);
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  transition: transform 0.15s;
+}
+.chevron.open {
+  transform: rotate(90deg);
+}
+
+.tree-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.tree-row.dir .tree-icon { color: #e3b341; }
+.tree-row.file .tree-icon { color: #79c0ff; }
+.tree-row.selected .tree-icon { color: var(--accent-hover); }
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+
+.tree-children {
+  /* no extra indent — handled by padding-left on rows */
+}
