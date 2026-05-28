@@ -1,0 +1,16 @@
+[Unit]
+Description=MD Reader backend (Express API)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__
+ExecStart=__NODE_BIN__ server/index.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:__APP_DIR__/logs/server.log
+StandardError=append:__APP_DIR__/logs/server.log
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
-# Stop MD Reader processes started by start.sh.
+# Stop MD Reader.
+#
+# Mirrors start.sh: uses systemd user units if installed, otherwise
+# falls back to PID-file based shutdown.
 
 cd "$(dirname "$0")"
+
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+if command -v systemctl >/dev/null 2>&1 \
+   && [ -f "$UNIT_DIR/md-reader-server.service" ] \
+   && [ -f "$UNIT_DIR/md-reader-client.service" ]; then
+  echo "Stopping via systemd..."
+  systemctl --user stop md-reader-client.service md-reader-server.service
+  echo "Done."
+  exit 0
+fi
 
 stop_one() {
   local name="$1"

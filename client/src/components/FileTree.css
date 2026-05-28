@@ -45,6 +45,13 @@
   align-items: center;
 }
 
+.tree-row.drag-over {
+  background: rgba(56, 139, 253, 0.18);
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
 .tree-row.dir .tree-icon { color: #e3b341; }
 .tree-row.file .tree-icon { color: #79c0ff; }
 .tree-row.selected .tree-icon { color: var(--accent-hover); }
@@ -58,3 +65,51 @@
 .tree-children {
   /* no extra indent — handled by padding-left on rows */
 }
+
+.tree-menu-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.55;
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+}
+.tree-menu-btn:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.tree-row:hover .tree-menu-btn { opacity: 1; }
+
+.node-menu {
+  z-index: 1000;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  min-width: 160px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+}
+.node-menu-item {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.node-menu-item:hover {
+  background: var(--bg-tertiary);
+}
+.node-menu-item.danger { color: #f85149; }
+.node-menu-item.danger:hover { background: rgba(248, 81, 73, 0.15); }

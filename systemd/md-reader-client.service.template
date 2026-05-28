@@ -1,0 +1,17 @@
+[Unit]
+Description=MD Reader frontend (Vite dev server)
+After=network.target md-reader-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__/client
+ExecStart=__NPM_BIN__ run dev
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:__APP_DIR__/logs/client.log
+StandardError=append:__APP_DIR__/logs/client.log
+# Vite spawns child workers; KillMode=mixed ensures they're cleaned up on stop.
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
