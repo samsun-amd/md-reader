@@ -1,24 +1,35 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 
 const filesRouter = require('./routes/files');
 const contentRouter = require('./routes/content');
 const uploadRouter = require('./routes/upload');
-
-function loadConfig() {
-  const cfgPath = path.join(__dirname, '../config.json');
-  return JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-}
+const configRouter = require('./routes/config');
+const { loadConfig } = require('./lib/paths');
 
 const app = express();
-app.use(cors());
+
+// This API can read and write files on disk, so only allow requests from the
+// local dev client (and same-origin / non-browser tools that send no Origin).
+// Without this, any website you visit could call the API via your browser.
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    try {
+      const { hostname } = new URL(origin);
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+        return cb(null, true);
+      }
+    } catch { /* fall through to denial */ }
+    return cb(new Error('Not allowed by CORS'));
+  },
+}));
 app.use(express.json({ limit: '20mb' }));
 
 app.use('/api/files', filesRouter);
 app.use('/api/content', contentRouter);
 app.use('/api/upload', uploadRouter);
+app.use('/api/config', configRouter);
 
 const config = loadConfig();
 const port = config.port || 3001;

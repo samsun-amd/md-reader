@@ -81,6 +81,8 @@ npm run install:all
 
 > `config.json` is **gitignored** — it stays local and never gets committed.
 
+> The server caches config on startup. After editing `config.json`, click **↺** in the sidebar header to reload it — no restart needed.
+
 ---
 
 ## Running the app
@@ -142,7 +144,7 @@ then run `wsl --shutdown` from Windows and reopen the shell. `systemctl is-syste
   - Folders → **New file…** (auto-appends `.md` if you don't, opens immediately in the editor).
   - Files → **Rename…** or **Delete** (asks for confirmation).
 - **Drag & drop** files from Windows Explorer / Finder onto any folder row to upload them. Multiple files at once work. Same-named files are auto-renamed to `name (2).md`, `name (3).md`, … — nothing is ever overwritten.
-- Hit **↺** in the sidebar header to manually re-scan the disk.
+- Hit **↺** in the sidebar header to **reload `config.json`** on the server (picks up edited roots/ports without a restart) and re-scan the disk.
 
 ---
 
@@ -154,8 +156,9 @@ then run `wsl --shutdown` from Windows and reopen the shell. `systemctl is-syste
 | Browser shows "Loading…" forever | Check `logs/server.log` — usually the path in `config.json` doesn't exist |
 | `EADDRINUSE` in logs | Change `port` / `clientPort` in `config.json`, or kill the conflicting process (`ss -tlnp \| grep :PORT`) |
 | Sidebar is empty | Configured root has no `.md` / `.mdx` files (other types are hidden by design) |
-| Changes to `config.json` not showing | Refresh the browser tab (Ctrl+R). Config is re-read on every API request. |
+| Changes to `config.json` not showing | Click **↺** in the sidebar header to reload config (it's cached server-side). New `roots` / ports apply without a restart. |
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
+| API calls fail only from another site/tab | CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`. |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
 
 ---
@@ -172,19 +175,21 @@ md-reader/
 │   ├── install.sh              # renders templates → ~/.config/systemd/user
 │   └── uninstall.sh
 ├── server/                     # Express API (port 3001 by default)
-│   ├── index.js
-│   ├── lib/paths.js            # loadConfig, isUnderRoot, uniqueName
+│   ├── index.js                # app wiring + localhost-only CORS
+│   ├── lib/paths.js            # config cache, isUnderRoot (symlink-safe), uniqueName, fsErrorStatus
 │   └── routes/
 │       ├── files.js            # GET tree; POST /new, /rename; DELETE
 │       ├── content.js          # GET / PUT markdown body
-│       └── upload.js           # POST multipart upload (multer)
+│       ├── upload.js           # POST multipart upload (multer)
+│       └── config.js           # POST /reload — re-read config.json
 └── client/                     # Vite + React (port 5174 by default)
     └── src/
-        ├── App.jsx             # 3-column resizable layout
+        ├── App.jsx             # 3-column resizable layout + unsaved-change guard
         └── components/
-            ├── Sidebar.jsx     # drives all mutations + toasts
+            ├── Sidebar.jsx     # drives all mutations + toasts + config reload
             ├── FileTree.jsx    # rows, ⋯ menu, drag-drop targets
-            ├── MarkdownViewer.jsx   # Read/Split/Edit + CodeMirror + save
+            ├── MarkdownViewer.jsx   # Read/Split/Edit + live preview + save
+            ├── Editor.jsx      # CodeMirror, lazy-loaded (Read mode skips it)
             └── TocPanel.jsx    # nested collapsible TOC + scrollspy
 ```
 
@@ -201,7 +206,15 @@ Vite proxies `/api/*` to Express, so you only ever open one URL.
 | GET    | `/api/content` | `?path=...` | Read raw markdown |
 | PUT    | `/api/content` | `{ path, content }` | Save edited markdown |
 | POST   | `/api/upload`  | multipart: `folder`, `files[]` | Upload one or many `.md`/`.mdx` |
+| POST   | `/api/config/reload` | — | Re-read `config.json` into the server cache |
 
 ### Security model
 
-The backend rejects any path that doesn't resolve under one of the configured `roots`, blocks path traversal via `path.basename` + `path.resolve`, and only operates on `.md` / `.mdx` files. There is no auth — this is meant to run locally on your own machine.
+The backend:
+
+- Rejects any path that doesn't resolve under one of the configured `roots`. Paths are canonicalized with `realpath`, so **symlinks pointing outside a root are blocked** (a symlinked parent can't be used to escape).
+- Blocks path traversal (`..`) and strips directory components from uploaded/created names via `path.basename`.
+- Only reads/writes/deletes `.md` / `.mdx` files.
+- Restricts **CORS to the local client** (`localhost` / `127.0.0.1` / `[::1]`, plus non-browser tools that send no `Origin`), so a random website you visit can't drive the file API through your browser.
+
+There is no auth — this is meant to run locally on your own machine.

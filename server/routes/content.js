@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { loadConfig, isUnderRoot } = require('../lib/paths');
+const { loadConfig, isUnderRoot, fsErrorStatus } = require('../lib/paths');
 
 const router = express.Router();
 
@@ -23,7 +23,7 @@ router.get('/', (req, res) => {
     const content = fs.readFileSync(resolved, 'utf8');
     res.type('text/plain').send(content);
   } catch (err) {
-    res.status(404).json({ error: err.message });
+    res.status(fsErrorStatus(err)).json({ error: err.message });
   }
 });
 
@@ -48,7 +48,7 @@ router.put('/', (req, res) => {
     fs.writeFileSync(resolved, content, 'utf8');
     res.json({ ok: true, path: resolved, bytes: Buffer.byteLength(content, 'utf8') });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(fsErrorStatus(err)).json({ error: err.message });
   }
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,13 +6,11 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import rehypeSlug from 'rehype-slug';
 import GithubSlugger from 'github-slugger';
-import CodeMirror from '@uiw/react-codemirror';
-import { markdown } from '@codemirror/lang-markdown';
-import { oneDark } from '@codemirror/theme-one-dark';
-import { EditorView } from '@codemirror/view';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github-dark.css';
 import './MarkdownViewer.css';
+
+const Editor = lazy(() => import('./Editor'));
 
 function MermaidBlock({ code }) {
   const ref = useRef(null);
@@ -67,7 +65,37 @@ function extractHeadings(markdown) {
   return headings;
 }
 
+// react-markdown does not parse HTML by default, so raw HTML comments are
+// rendered as plain text. Strip them before passing to the renderer so they
+// remain invisible (matching GitHub / CommonMark behavior). Comments inside
+// fenced code blocks must be preserved.
+function stripHtmlComments(text) {
+  const lines = text.split('\n');
+  let inFence = false;
+  let fenceMarker = '';
+  const kept = [];
+  let buffer = '';
+  const flush = () => {
+    if (!buffer) return;
+    kept.push(buffer.replace(/<!--[\s\S]*?-->/g, ''));
+    buffer = '';
+  };
+  for (const raw of lines) {
+    const fenceMatch = raw.match(/^(\s*)(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[2][0];
+      if (!inFence) { flush(); inFence = true; fenceMarker = marker; kept.push(raw); continue; }
+      if (marker === fenceMarker) { inFence = false; kept.push(raw); continue; }
+    }
+    if (inFence) { kept.push(raw); continue; }
+    buffer += (buffer ? '\n' : '') + raw;
+  }
+  flush();
+  return kept.join('\n');
+}
+
 function Preview({ markdown: text }) {
+  const cleaned = useMemo(() => stripHtmlComments(text), [text]);
   return (
     <ReactMarkdown
       className="markdown-body"
@@ -75,7 +103,7 @@ function Preview({ markdown: text }) {
       rehypePlugins={[rehypeSlug, rehypeHighlight, rehypeKatex]}
       components={{ code: CodeBlock }}
     >
-      {text}
+      {cleaned}
     </ReactMarkdown>
   );
 }
@@ -84,7 +112,7 @@ const MODE_READ = 'read';
 const MODE_SPLIT = 'split';
 const MODE_EDIT = 'edit';
 
-export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange }) {
+export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, onDirtyChange }) {
   const [savedContent, setSavedContent] = useState('');
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -96,11 +124,12 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange }
   const bodyRef = scrollRef || internalRef;
   const dirty = content !== savedContent;
 
+  // Report dirty state to the parent, which guards file switches against
+  // discarding unsaved edits (see App.requestSelect).
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+
   useEffect(() => {
     if (!filePath) { setContent(''); setSavedContent(''); return; }
-    if (dirty && !window.confirm('You have unsaved changes. Discard them?')) {
-      return;
-    }
     setLoading(true);
     setError(null);
     setSaveError(null);
@@ -111,8 +140,6 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange }
       })
       .then((text) => { setContent(text); setSavedContent(text); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
-    // intentionally not depending on `dirty` (would re-run on every keystroke)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath]);
 
   const headings = useMemo(() => extractHeadings(content), [content]);
@@ -155,11 +182,6 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange }
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [mode, save]);
-
-  const cmExtensions = useMemo(() => [
-    markdown(),
-    EditorView.lineWrapping,
-  ], []);
 
   if (!filePath) {
     return (
@@ -207,19 +229,9 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange }
         <div className={`viewer-content mode-${mode}`}>
           {(mode === MODE_EDIT || mode === MODE_SPLIT) && (
             <div className="editor-pane">
-              <CodeMirror
-                value={content}
-                theme={oneDark}
-                extensions={cmExtensions}
-                onChange={(v) => setContent(v)}
-                basicSetup={{
-                  lineNumbers: true,
-                  highlightActiveLine: true,
-                  foldGutter: true,
-                  history: true,
-                }}
-                height="100%"
-              />
+              <Suspense fallback={<div className="viewer-status">Loading editor…</div>}>
+                <Editor value={content} onChange={(v) => setContent(v)} />
+              </Suspense>
             </div>
           )}
           {(mode === MODE_READ || mode === MODE_SPLIT) && (

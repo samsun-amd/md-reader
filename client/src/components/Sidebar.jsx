@@ -24,6 +24,20 @@ export default function Sidebar({ selectedFile, onSelect }) {
     setTimeout(() => setToast(null), 3500);
   }, []);
 
+  // Re-read config.json on the server (picks up edited roots/ports without a
+  // restart), then rebuild the file tree from the new roots.
+  const reloadConfig = useCallback(async () => {
+    try {
+      const r = await fetch('/api/config/reload', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      showToast('Config reloaded');
+    } catch (e) {
+      showToast(`Reload failed: ${e.message}`, 'error');
+    }
+    refresh();
+  }, [refresh, showToast]);
+
   const uploadFiles = useCallback(async (folderPath, fileList) => {
     const files = Array.from(fileList).filter((f) => /\.(md|mdx)$/i.test(f.name));
     if (files.length === 0) {
@@ -108,7 +122,7 @@ export default function Sidebar({ selectedFile, onSelect }) {
     <div className="sidebar">
       <div className="sidebar-header">
         <span className="sidebar-title">Files</span>
-        <button className="refresh-btn" onClick={refresh} title="Refresh">↺</button>
+        <button className="refresh-btn" onClick={reloadConfig} title="Reload config & refresh">↺</button>
       </div>
       <div className="sidebar-tree">
         {loading && <div className="sidebar-status">Loading…</div>}

@@ -14,6 +14,18 @@ export default function App() {
   const [draggingTarget, setDraggingTarget] = useState(null);
   const [headings, setHeadings] = useState([]);
   const viewerScrollRef = useRef(null);
+  const dirtyRef = useRef(false);
+
+  // Guard genuine file switches (tree clicks, opening a new file) so unsaved
+  // edits aren't silently dropped. The confirm lives here — not in the viewer's
+  // load effect — because by the time the prop changes the selection is already
+  // committed, so a cancel there can't restore the previous file.
+  const requestSelect = useCallback((path) => {
+    if (dirtyRef.current && !window.confirm('You have unsaved changes. Discard them?')) {
+      return;
+    }
+    setSelectedFile(path);
+  }, []);
 
   const startDrag = useCallback((target, startX, startWidth, min, max, sign) => {
     setDraggingTarget(target);
@@ -46,7 +58,7 @@ export default function App() {
   return (
     <div className={`app-layout${draggingTarget ? ' dragging' : ''}`}>
       <div className="sidebar-panel" style={{ width: sidebarWidth }}>
-        <Sidebar selectedFile={selectedFile} onSelect={setSelectedFile} />
+        <Sidebar selectedFile={selectedFile} onSelect={requestSelect} />
       </div>
       <div className="resize-handle" onMouseDown={handleSidebarDrag} />
       <div className="content-panel">
@@ -54,6 +66,7 @@ export default function App() {
           filePath={selectedFile}
           scrollRef={viewerScrollRef}
           onHeadingsChange={setHeadings}
+          onDirtyChange={(d) => { dirtyRef.current = d; }}
         />
       </div>
       {!tocCollapsed && (
