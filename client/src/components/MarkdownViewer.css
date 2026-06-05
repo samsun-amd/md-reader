@@ -63,6 +63,33 @@
   color: #fff;
 }
 
+.history-controls {
+  display: inline-flex;
+  gap: 2px;
+}
+.history-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  width: 28px;
+  height: 26px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.history-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.history-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .save-btn {
   background: var(--accent);
   border: none;
@@ -150,6 +177,7 @@
   line-height: 1.7;
   font-size: 15px;
   max-width: 860px;
+  margin: 0 auto;
 }
 
 .markdown-body h1,

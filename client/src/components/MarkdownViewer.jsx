@@ -120,9 +120,20 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
   const [mode, setMode] = useState(MODE_READ);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
+  const [history, setHistory] = useState({ canUndo: false, canRedo: false });
+  const [editorReady, setEditorReady] = useState(false);
   const internalRef = useRef(null);
   const bodyRef = scrollRef || internalRef;
+  const editorApiRef = useRef(null);
+  const editorPaneRef = useRef(null);
   const dirty = content !== savedContent;
+
+  const handleEditorReady = useCallback((api) => {
+    editorApiRef.current = api;
+    setEditorReady(true);
+  }, []);
+  const doUndo = useCallback(() => editorApiRef.current?.undo(), []);
+  const doRedo = useCallback(() => editorApiRef.current?.redo(), []);
 
   // Report dirty state to the parent, which guards file switches against
   // discarding unsaved edits (see App.requestSelect).
@@ -141,6 +152,16 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
       .then((text) => { setContent(text); setSavedContent(text); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
   }, [filePath]);
+
+  // The editor only exists in edit/split mode. When it unmounts, drop the
+  // stale view handle and history flags so the toolbar reflects reality.
+  useEffect(() => {
+    if (mode === MODE_READ) {
+      editorApiRef.current = null;
+      setEditorReady(false);
+      setHistory({ canUndo: false, canRedo: false });
+    }
+  }, [mode]);
 
   const headings = useMemo(() => extractHeadings(content), [content]);
 
@@ -183,6 +204,35 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
     return () => window.removeEventListener('keydown', handler);
   }, [mode, save]);
 
+  // Synced scrolling in split mode: map each pane's scroll position to the
+  // other proportionally. A flag breaks the feedback loop so the programmatic
+  // scroll we trigger doesn't echo back and fight the user's input.
+  useEffect(() => {
+    if (mode !== MODE_SPLIT || loading || error) return;
+    const preview = bodyRef.current;
+    const editor = editorPaneRef.current?.querySelector('.cm-scroller');
+    if (!preview || !editor) return;
+
+    let active = null;
+    const sync = (src, dst) => {
+      if (active && active !== src) return;
+      active = src;
+      const srcMax = src.scrollHeight - src.clientHeight;
+      const dstMax = dst.scrollHeight - dst.clientHeight;
+      const ratio = srcMax > 0 ? src.scrollTop / srcMax : 0;
+      dst.scrollTop = ratio * dstMax;
+      requestAnimationFrame(() => { active = null; });
+    };
+    const onEditorScroll = () => sync(editor, preview);
+    const onPreviewScroll = () => sync(preview, editor);
+    editor.addEventListener('scroll', onEditorScroll, { passive: true });
+    preview.addEventListener('scroll', onPreviewScroll, { passive: true });
+    return () => {
+      editor.removeEventListener('scroll', onEditorScroll);
+      preview.removeEventListener('scroll', onPreviewScroll);
+    };
+  }, [mode, loading, error, editorReady, bodyRef]);
+
   if (!filePath) {
     return (
       <div className="viewer-empty">
@@ -200,6 +250,24 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
           {filePath}
         </span>
         <div className="viewer-actions">
+          {mode !== MODE_READ && (
+            <div className="history-controls" role="group">
+              <button
+                className="history-btn"
+                onClick={doUndo}
+                disabled={!history.canUndo}
+                title="Undo (Ctrl+Z)"
+                aria-label="Undo"
+              >↶</button>
+              <button
+                className="history-btn"
+                onClick={doRedo}
+                disabled={!history.canRedo}
+                title="Redo (Ctrl+Shift+Z)"
+                aria-label="Redo"
+              >↷</button>
+            </div>
+          )}
           <div className="mode-toggle" role="group">
             {[MODE_READ, MODE_SPLIT, MODE_EDIT].map((m) => (
               <button
@@ -228,9 +296,14 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
       {!loading && !error && (
         <div className={`viewer-content mode-${mode}`}>
           {(mode === MODE_EDIT || mode === MODE_SPLIT) && (
-            <div className="editor-pane">
+            <div className="editor-pane" ref={editorPaneRef}>
               <Suspense fallback={<div className="viewer-status">Loading editor…</div>}>
-                <Editor value={content} onChange={(v) => setContent(v)} />
+                <Editor
+                  value={content}
+                  onChange={(v) => setContent(v)}
+                  onReady={handleEditorReady}
+                  onHistoryChange={setHistory}
+                />
               </Suspense>
             </div>
           )}
