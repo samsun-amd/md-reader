@@ -94,13 +94,31 @@ function stripHtmlComments(text) {
   return kept.join('\n');
 }
 
+// Stamp every top-level rendered element with its originating markdown line
+// (1-based) as data-source-line, so split-mode scroll sync can anchor on real
+// source positions instead of a height ratio. Lines are relative to the cleaned
+// text; they match the editor's document exactly except below a multi-line HTML
+// comment (rare), where stripHtmlComments collapses lines and anchors drift a
+// little — acceptable for a scroll heuristic.
+function rehypeSourceLines() {
+  return (tree) => {
+    for (const node of tree.children) {
+      const line = node.position?.start?.line;
+      if (node.type === 'element' && line) {
+        node.properties = node.properties || {};
+        node.properties['dataSourceLine'] = line;
+      }
+    }
+  };
+}
+
 function Preview({ markdown: text }) {
   const cleaned = useMemo(() => stripHtmlComments(text), [text]);
   return (
     <ReactMarkdown
       className="markdown-body"
       remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeSlug, rehypeHighlight, rehypeKatex]}
+      rehypePlugins={[rehypeSlug, rehypeHighlight, rehypeKatex, rehypeSourceLines]}
       components={{ code: CodeBlock }}
     >
       {cleaned}
@@ -204,34 +222,93 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
     return () => window.removeEventListener('keydown', handler);
   }, [mode, save]);
 
-  // Synced scrolling in split mode: map each pane's scroll position to the
-  // other proportionally. A flag breaks the feedback loop so the programmatic
-  // scroll we trigger doesn't echo back and fight the user's input.
+  // Synced scrolling in split mode. Anchoring on source lines (not a height
+  // ratio) keeps the panes aligned even when blocks render at wildly different
+  // heights than their source — a tall code block, a one-line heading, etc.
+  // Each preview block carries data-source-line; we interpolate between the two
+  // blocks straddling the viewport top to get a fractional line, then ask the
+  // other pane where that line sits. A flag breaks the programmatic-scroll echo.
   useEffect(() => {
     if (mode !== MODE_SPLIT || loading || error) return;
     const preview = bodyRef.current;
     const editor = editorPaneRef.current?.querySelector('.cm-scroller');
-    if (!preview || !editor) return;
+    const api = editorApiRef.current;
+    if (!preview || !editor || !api) return;
+
+    // Ordered (top, line) anchors for the preview's top-level blocks. Measure
+    // each block's offset relative to the scroller's content top via rects —
+    // offsetTop is relative to the nearest positioned ancestor (here the page,
+    // not the scroller), which adds a constant skew that compounds downward.
+    let anchors = [];
+    const measure = () => {
+      anchors = [];
+      const base = preview.getBoundingClientRect().top - preview.scrollTop;
+      for (const el of preview.querySelectorAll('.markdown-body > [data-source-line]')) {
+        anchors.push({
+          top: el.getBoundingClientRect().top - base,
+          line: Number(el.dataset.sourceLine),
+        });
+      }
+    };
+    measure();
+
+    // Fractional source line at the preview's current scroll position.
+    const previewToLine = () => {
+      const y = preview.scrollTop;
+      if (!anchors.length) return 1;
+      if (y <= anchors[0].top) return anchors[0].line;
+      for (let i = 0; i < anchors.length - 1; i++) {
+        const a = anchors[i], b = anchors[i + 1];
+        if (y < b.top) {
+          const frac = (y - a.top) / (b.top - a.top);
+          return a.line + frac * (b.line - a.line);
+        }
+      }
+      return anchors[anchors.length - 1].line;
+    };
+
+    // Preview scroll offset for a fractional source line (inverse of above).
+    const lineToPreview = (line) => {
+      if (!anchors.length) return 0;
+      if (line <= anchors[0].line) return anchors[0].top;
+      for (let i = 0; i < anchors.length - 1; i++) {
+        const a = anchors[i], b = anchors[i + 1];
+        if (line < b.line) {
+          const frac = b.line > a.line ? (line - a.line) / (b.line - a.line) : 0;
+          return a.top + frac * (b.top - a.top);
+        }
+      }
+      return anchors[anchors.length - 1].top;
+    };
 
     let active = null;
-    const sync = (src, dst) => {
-      if (active && active !== src) return;
-      active = src;
-      const srcMax = src.scrollHeight - src.clientHeight;
-      const dstMax = dst.scrollHeight - dst.clientHeight;
-      const ratio = srcMax > 0 ? src.scrollTop / srcMax : 0;
-      dst.scrollTop = ratio * dstMax;
-      requestAnimationFrame(() => { active = null; });
+    const release = () => requestAnimationFrame(() => { active = null; });
+    const onEditorScroll = () => {
+      if (active && active !== 'editor') return;
+      active = 'editor';
+      const line = api.offsetToLine(editor.scrollTop);
+      preview.scrollTop = lineToPreview(line);
+      release();
     };
-    const onEditorScroll = () => sync(editor, preview);
-    const onPreviewScroll = () => sync(preview, editor);
+    const onPreviewScroll = () => {
+      if (active && active !== 'preview') return;
+      active = 'preview';
+      const line = previewToLine();
+      editor.scrollTop = api.lineToOffset(line);
+      release();
+    };
+
     editor.addEventListener('scroll', onEditorScroll, { passive: true });
     preview.addEventListener('scroll', onPreviewScroll, { passive: true });
+    // Block heights shift as images load or the editor reflows; re-measure.
+    const ro = new ResizeObserver(measure);
+    ro.observe(preview.querySelector('.markdown-body') || preview);
     return () => {
       editor.removeEventListener('scroll', onEditorScroll);
       preview.removeEventListener('scroll', onPreviewScroll);
+      ro.disconnect();
     };
-  }, [mode, loading, error, editorReady, bodyRef]);
+  }, [mode, loading, error, editorReady, content, bodyRef]);
 
   if (!filePath) {
     return (
