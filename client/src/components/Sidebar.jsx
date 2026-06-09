@@ -128,17 +128,23 @@ export default function Sidebar({ selectedFile, onSelect }) {
         {loading && <div className="sidebar-status">Loading…</div>}
         {error && <div className="sidebar-status error">{error}</div>}
         {!loading && !error && tree.map((root) => (
-          <FileTree
-            key={root.path}
-            node={root}
-            depth={0}
-            selectedFile={selectedFile}
-            onSelect={onSelect}
-            onUpload={uploadFiles}
-            onCreateFile={createFile}
-            onRenameFile={renameFile}
-            onDeleteFile={deleteFile}
-          />
+          root.error ? (
+            <div key={root.path} className="sidebar-status error" title={root.error}>
+              {root.name}: {root.error}
+            </div>
+          ) : (
+            <FileTree
+              key={root.path}
+              node={root}
+              depth={0}
+              selectedFile={selectedFile}
+              onSelect={onSelect}
+              onUpload={uploadFiles}
+              onCreateFile={createFile}
+              onRenameFile={renameFile}
+              onDeleteFile={deleteFile}
+            />
+          )
         ))}
       </div>
       {toast && (

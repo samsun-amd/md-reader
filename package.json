@@ -5,7 +5,9 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "node server/index.js",
     "dev:client": "npm --prefix client run dev",
-    "install:all": "npm install && npm --prefix client install"
+    "install:all": "npm install && npm --prefix client install",
+    "link-core": "bash scripts/link-core.sh",
+    "install:remote": "npm run install:all && npm run link-core"
   },
   "dependencies": {
     "concurrently": "^8.2.2",

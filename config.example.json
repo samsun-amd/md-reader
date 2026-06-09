@@ -1,6 +1,7 @@
 {
   "roots": [
-    { "name": "My Docs", "path": "~/md" }
+    { "id": "docs", "name": "My Docs", "type": "local", "path": "~/md" },
+    { "id": "srv", "name": "Servant", "type": "remote", "node": "client", "remotePath": "~/notes" }
   ],
   "port": 3001,
   "clientPort": 5174

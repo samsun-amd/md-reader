@@ -9,9 +9,49 @@ function expandHome(p) {
   return p;
 }
 
+// Derive a stable id from a root's name when none is given. Lowercase slug;
+// falls back to the index-based id the caller passes in.
+function slugId(name, fallback) {
+  const slug = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || fallback;
+}
+
+// Normalize a raw config root into a consistent shape:
+//   { id, name, type: 'local'|'remote', path? , node?, remotePath? }
+// Back-compat: a bare { name, path } with no type is treated as local.
+function normalizeRoot(raw, index) {
+  const type = raw.type || 'local';
+  const id = raw.id || slugId(raw.name, `root${index + 1}`);
+  if (type === 'remote') {
+    return {
+      id,
+      name: raw.name || raw.node || id,
+      type: 'remote',
+      node: raw.node,
+      remotePath: raw.remotePath || '~',
+    };
+  }
+  return {
+    id,
+    name: raw.name || id,
+    type: 'local',
+    path: expandHome(raw.path),
+  };
+}
+
 function readConfigFromDisk() {
   const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  cfg.roots = cfg.roots.map((r) => ({ ...r, path: expandHome(r.path) }));
+  cfg.roots = (cfg.roots || []).map((r, i) => normalizeRoot(r, i));
+  const seen = new Set();
+  for (const r of cfg.roots) {
+    if (seen.has(r.id)) {
+      throw new Error(`Duplicate root id "${r.id}" in config.json (ids must be unique)`);
+    }
+    seen.add(r.id);
+  }
   return cfg;
 }
 
@@ -27,6 +67,53 @@ function loadConfig() {
 function reloadConfig() {
   cachedConfig = readConfigFromDisk();
   return cachedConfig;
+}
+
+function rootById(config, id) {
+  return config.roots.find((r) => r.id === id) || null;
+}
+
+// --- token codec ---------------------------------------------------------
+// A token carries the owning root's identity so a route can tell which machine
+// (and which backend) a path belongs to. Client treats it as an opaque string.
+//   local:<id>::<absolutePath>
+//   remote:<id>::<remotePosixPath>
+const TOKEN_SEP = '::';
+
+function encodeToken(root, innerPath) {
+  return `${root.type}:${root.id}${TOKEN_SEP}${innerPath}`;
+}
+
+function badToken(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function parseToken(token) {
+  if (typeof token !== 'string') throw badToken('Invalid token');
+  const sepIdx = token.indexOf(TOKEN_SEP);
+  if (sepIdx < 0) throw badToken('Malformed token (missing separator)');
+  const head = token.slice(0, sepIdx);
+  const innerPath = token.slice(sepIdx + TOKEN_SEP.length);
+  const colon = head.indexOf(':');
+  if (colon < 0) throw badToken('Malformed token (missing type)');
+  const type = head.slice(0, colon);
+  const id = head.slice(colon + 1);
+  if ((type !== 'local' && type !== 'remote') || !id) {
+    throw badToken('Malformed token (bad type or id)');
+  }
+  return { type, id, innerPath };
+}
+
+// Resolve a token to its owning root, validating the type matches. Unknown root
+// => 404; type mismatch => 400. Callers surface err.status.
+function resolveToken(config, token) {
+  const { type, id, innerPath } = parseToken(token);
+  const root = rootById(config, id);
+  if (!root) { const e = new Error(`Unknown root id "${id}"`); e.status = 404; throw e; }
+  if (root.type !== type) throw badToken(`Token type "${type}" does not match root "${id}"`);
+  return { root, innerPath };
 }
 
 // Resolve a path to its canonical form, following symlinks where the target
@@ -50,12 +137,21 @@ function realpathBestEffort(target) {
   return path.resolve(target);
 }
 
+// Local-root boundary check. Accepts the resolved local roots only.
 function isUnderRoot(targetPath, roots) {
   const resolved = realpathBestEffort(targetPath);
   return roots.some((root) => {
+    if (root.type && root.type !== 'local') return false;
     const rootResolved = realpathBestEffort(root.path);
     return resolved === rootResolved || resolved.startsWith(rootResolved + path.sep);
   });
+}
+
+// Confirm a resolved local path sits under one specific local root.
+function isUnderSpecificRoot(targetPath, root) {
+  const resolved = realpathBestEffort(targetPath);
+  const rootResolved = realpathBestEffort(root.path);
+  return resolved === rootResolved || resolved.startsWith(rootResolved + path.sep);
 }
 
 // Map a Node fs error to an HTTP status code so routes can report the real
@@ -71,6 +167,14 @@ function fsErrorStatus(err) {
   }
 }
 
+// Attach an HTTP status to a thrown filesystem error (in place) so routes can
+// report the real cause (404/403/...) instead of a blanket 500. Returns the
+// same error for convenient re-throwing. Existing err.status wins.
+function withFsStatus(err) {
+  if (err && err.status == null) err.status = fsErrorStatus(err);
+  return err;
+}
+
 function uniqueName(dir, filename) {
   const ext = path.extname(filename);
   const base = path.basename(filename, ext);
@@ -83,4 +187,17 @@ function uniqueName(dir, filename) {
   return candidate;
 }
 
-module.exports = { expandHome, loadConfig, reloadConfig, isUnderRoot, uniqueName, fsErrorStatus };
+module.exports = {
+  expandHome,
+  loadConfig,
+  reloadConfig,
+  rootById,
+  isUnderRoot,
+  isUnderSpecificRoot,
+  uniqueName,
+  fsErrorStatus,
+  withFsStatus,
+  encodeToken,
+  parseToken,
+  resolveToken,
+};
