@@ -1,5 +1,5 @@
 const express = require('express');
-const { loadConfig, resolveToken } = require('../lib/paths');
+const { loadConfig, rootById, resolveToken } = require('../lib/paths');
 const { backendFor } = require('../lib/backend');
 
 const router = express.Router();
@@ -16,26 +16,33 @@ function validName(name) {
     && !name.startsWith('.');
 }
 
-// GET /api/files — build the tree for every root via its backend. A failing
-// remote root reports an error node instead of sinking the whole response.
-router.get('/', async (req, res) => {
+// GET /api/files/roots — root metadata only, no tree walking. Lets the client
+// build the tab/sub-tab structure instantly without touching any remote.
+router.get('/roots', (req, res) => {
   let config;
   try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json(config.roots.map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type,
+    node: r.node || null,
+  })));
+});
 
-  const trees = await Promise.all(config.roots.map(async (root) => {
-    try {
-      return await backendFor(root).listTree(root);
-    } catch (e) {
-      return {
-        name: root.name,
-        path: `error:${root.id}`,
-        type: 'root',
-        error: e.message,
-        children: [],
-      };
-    }
-  }));
-  res.json(trees);
+// GET /api/files/root/:id — build the tree for ONE root. Each root loads
+// independently so a slow/offline remote never blocks local roots or other
+// remotes. Connectivity failures surface as the backend's status (e.g. 503).
+router.get('/root/:id', async (req, res) => {
+  let config;
+  try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  const root = rootById(config, req.params.id);
+  if (!root) return res.status(404).json({ error: `Unknown root id "${req.params.id}"` });
+  try {
+    const tree = await backendFor(root).listTree(root);
+    res.json(tree);
+  } catch (e) {
+    res.status(statusOf(e)).json({ error: e.message });
+  }
 });
 
 // POST /api/files/new   body: { folder, name }   (folder is a token)

@@ -49,35 +49,61 @@ npm  --version
 
 ## First-time setup
 
+**Deploy from scratch (local folders only) — 4 steps:**
+
 ```bash
+# 1. Clone
 git clone <this-repo-url> md-reader
 cd md-reader
 
-# Create your local config from the template
+# 2. Create your config from the template, then edit it to point at your folders
 cp config.example.json config.json
-# Edit config.json to point at the folder(s) you want to browse
+$EDITOR config.json          # set the roots[].path values (see below)
 
-# Install backend + frontend dependencies (~1 min)
+# 3. Install backend + frontend dependencies (~1 min)
 npm run install:all
+
+# 4. Run it
+./start.sh                   # starts server + client in the background
 ```
+
+Then open <http://localhost:5174> (or whatever `clientPort` you set).
+
+- Browsing **remote** machines over SSH too? Do [one extra install step](#enabling-remote-support)
+  (`npm run install:remote`) and add `type:"remote"` roots.
+- Want it to **auto-start on boot**? See [Run as a system service](#run-as-a-system-service-auto-start-on-boot).
+
+The rest of this section explains each piece in detail.
 
 ### Configuring `config.json`
 
 ```json
 {
   "roots": [
-    { "name": "Work Notes",    "path": "~/work/docs" },
-    { "name": "Personal Wiki", "path": "~/wiki" }
+    { "id": "work", "name": "Work Notes",    "type": "local", "path": "~/work/docs" },
+    { "id": "wiki", "name": "Personal Wiki", "type": "local", "path": "~/wiki" }
   ],
   "port": 3001,
   "clientPort": 5174
 }
 ```
 
-- `~` is expanded to your home directory.
-- Absolute paths work too: `/mnt/c/Users/you/notes`.
-- Each entry under `roots` shows up as a top-level node in the sidebar.
-- `port` = backend API port, `clientPort` = the URL you open in your browser.
+Each entry under `roots` is one folder shown in the sidebar. Fields for a **local**
+root:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `id` | recommended | Stable, **unique** id for the root (the path "routing key"). If omitted it's auto-derived from `name`, but set it explicitly so links stay stable. |
+| `name` | yes | Label shown in the sidebar. |
+| `type` | no (default `local`) | `"local"` reads from this machine's disk. Use `"remote"` for SSH (see [Remote roots](#remote-roots-readwrite-over-sshsftp)). |
+| `path` | yes (local) | Folder to browse. `~` expands to your home; absolute paths work too (`/mnt/c/Users/you/notes`). |
+
+- `port` = backend API port; `clientPort` = the URL you open in your browser.
+- Roots are grouped into **Local** / **Remote** tabs in the sidebar automatically —
+  you keep one flat `roots` array, the UI does the grouping.
+
+> **Back-compat:** a bare `{ "name": "...", "path": "..." }` (no `id`/`type`) still
+> works and is treated as local — but new configs should use the explicit form above.
 
 > `config.json` is **gitignored** — it stays local and never gets committed.
 
@@ -109,8 +135,8 @@ machine's `.md` tree and you read/write its files directly over SFTP — no manu
 ### What a remote root is
 
 A remote root names a machine (`node`) plus a folder on it (`remotePath`). The
-server connects over SFTP and lists/reads/writes that folder's `.md`/`.mdx`
-files exactly like a local root. Only `type:"remote"` roots ever touch the SSH
+server lists that folder's `.md`/`.mdx` files and reads/writes them over SFTP,
+exactly like a local root. Only `type:"remote"` roots ever touch the SSH
 library, so a purely local setup never needs it.
 
 | Field | Required | Meaning |
@@ -123,6 +149,47 @@ library, so a purely local setup never needs it.
 - Windows remotes work too — SFTP is OS-agnostic, no special handling.
 - The inventory file path can be overridden with `SSH_REMOTE_JSON`; otherwise it
   defaults to `~/note/ssh_remote.json`.
+
+### Sidebar: Local / Remote tabs
+
+`config.json` stays a single flat `roots` array — the sidebar groups it for you:
+
+- A **Local** and a **Remote** tab split roots by `type`.
+- Under **Remote**, one **sub-tab per machine** (`node`). Several roots that share
+  a `node` (e.g. `~/notes` and `~/docs` on the same box) appear together under that
+  machine's sub-tab, so you always know whose file system you're looking at.
+
+So to add another folder on an existing machine, just add another `type:"remote"`
+root with the same `node` and a different `id`/`remotePath` — no nesting needed.
+
+### Each root loads independently
+
+The sidebar fetches `GET /api/files/roots` (metadata only, no SSH) to build the
+tabs instantly, then loads each root's tree on its own via
+`GET /api/files/root/:id`:
+
+- **Local roots load eagerly and never wait on a remote.** A slow or offline
+  machine can no longer freeze the whole tree — it only affects its own sub-tab,
+  which shows an inline error with a **Retry** button.
+- **Remote sub-tabs load lazily** — a machine is only contacted when you first
+  open its sub-tab. **↺** reloads `config.json` and refreshes only the visible root.
+
+### How a remote tree is listed (fast)
+
+Listing a remote root runs **one** command over SSH instead of walking the tree
+directory-by-directory over SFTP (which is one network round-trip per directory —
+minutes on a home with tens of thousands of folders):
+
+- Primary: `rg --files -g '*.md' -g '*.mdx'` — ripgrep returns every match in one
+  shot (sub-second even on large trees) and, by default, skips hidden files and
+  honors `.gitignore`. Hidden files are intentionally never shown.
+- Fallback: if `rg` isn't on the remote (`exit 127`), it falls back to `find`.
+- The flat path list is reassembled into the nested folder tree server-side.
+- **Windows remotes** have no POSIX shell for this, so they keep using the
+  per-directory SFTP walk. (All-Linux setups always get the fast path.)
+
+Reads, writes, renames, deletes and uploads still go over SFTP — only **listing**
+uses the command path.
 
 ### The token model (how a path knows which machine it lives on)
 
@@ -163,11 +230,18 @@ anchored on a shell-expanded path.
 
 > **Re-link after every `npm install`.** A plain `npm install` prunes the
 > symlink (it's "extraneous"), so remote roots break until you re-run
-> `npm run link-core`.
+> `npm run link-core`. See [Maintenance](#re-link-ssh-managercore-after-any-npm-install-remote-only).
 
 > An offline or misconfigured remote root shows an **inline error in the
 > sidebar** (and the API returns **HTTP 503**) instead of hanging the whole
 > tree — other roots still load.
+
+**On the remote machine:** install **ripgrep** (`rg`) for fast tree listing — one
+command instead of thousands of SFTP round-trips, the difference between sub-second
+and minutes on a large home. It's optional (md-reader falls back to `find`, then to
+an SFTP walk) but strongly recommended. Install with `apt install ripgrep` /
+`dnf install ripgrep` / `brew install ripgrep`. You only need SSH access to the
+remote — nothing from this repo is installed there.
 
 ---
 
@@ -185,21 +259,62 @@ Open <http://localhost:5174> (or whatever `clientPort` is set to).
 
 ### Run as a system service (auto-start on boot)
 
+This installs two **systemd user services** (`md-reader-server`, `md-reader-client`)
+so the app starts automatically and restarts on failure.
+
 ```bash
-./systemd/install.sh       # installs ~/.config/systemd/user/md-reader-{server,client}.service
-                           # then enables + starts both
+# From the repo directory you want to run from:
+./systemd/install.sh       # renders + installs the unit files, enables + starts both
 
-# To survive reboot without an interactive login:
+# To survive reboot without an interactive login (recommended on WSL/headless):
 sudo loginctl enable-linger "$USER"
+```
 
-# Day-to-day: start.sh / stop.sh will automatically use systemctl when units exist.
+Day-to-day commands:
+
+```bash
 systemctl --user status   md-reader-server md-reader-client
 systemctl --user restart  md-reader-server md-reader-client
-journalctl --user -u md-reader-server -f
+systemctl --user stop     md-reader-server md-reader-client
+journalctl --user -u md-reader-server -f      # live backend logs
+journalctl --user -u md-reader-client -f      # live frontend logs
 
-# Remove the services later:
-./systemd/uninstall.sh
+./systemd/uninstall.sh     # remove the services
 ```
+
+> Once the units exist, `./start.sh` / `./stop.sh` automatically delegate to
+> `systemctl` instead of launching loose background processes.
+
+#### How the service path is set (important)
+
+systemd **cannot** use `~` or relative paths — `WorkingDirectory` and `ExecStart`
+must be absolute. So you never hand-edit a path; the installer fills it in:
+
+1. `systemd/*.service.template` contains a `__APP_DIR__` placeholder.
+2. `install.sh` computes the **absolute path of the repo it is run from** and
+   `sed`-substitutes it in, writing the result to
+   `~/.config/systemd/user/md-reader-{server,client}.service`.
+3. That absolute path is now **frozen** into the installed unit.
+
+This means **the service is bound to whichever directory you ran `install.sh` from.**
+Consequences a maintainer must know:
+
+- **Moving or switching to a different clone of the repo?** Re-run
+  `./systemd/install.sh` *from the new location*, then
+  `systemctl --user restart md-reader-server md-reader-client`. A bare
+  `enable --now` will **not** replace already-running processes — you must restart.
+- **Editing `config.json` / pulling new code but nothing changes?** A stale unit
+  may be serving an old copy. Check exactly which directory the live service runs in:
+  ```bash
+  ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd
+  ```
+  If that path isn't the repo you're editing, re-run `install.sh` from the right one.
+- To inspect the frozen paths directly:
+  ```bash
+  systemctl --user cat md-reader-server   # shows WorkingDirectory / ExecStart
+  ```
+
+#### WSL2 note
 
 On **WSL2**, systemd is off by default. Add to `/etc/wsl.conf`:
 
@@ -208,7 +323,8 @@ On **WSL2**, systemd is off by default. Add to `/etc/wsl.conf`:
 systemd=true
 ```
 
-then run `wsl --shutdown` from Windows and reopen the shell. `systemctl is-system-running` should report `running` or `degraded`.
+then run `wsl --shutdown` from Windows and reopen the shell.
+`systemctl is-system-running` should report `running` or `degraded`.
 
 ---
 
@@ -234,6 +350,81 @@ then run `wsl --shutdown` from Windows and reopen the shell. `systemctl is-syste
 
 ---
 
+## Maintenance & operations
+
+Day-to-day upkeep once it's deployed.
+
+### Updating to new code
+
+```bash
+git pull
+npm run install:all           # only if package.json changed
+npm run link-core             # ONLY if you use remote roots — see note below
+# Then restart whichever way you run it:
+systemctl --user restart md-reader-server md-reader-client   # if using systemd
+# or
+./stop.sh && ./start.sh                                      # if running loose
+```
+
+The backend caches code at process start, so **a restart is required** after
+pulling — editing files alone does nothing until the server restarts. (Only the
+Vite client hot-reloads on its own.)
+
+### Re-link `@ssh-manager/core` after any `npm install` (remote only)
+
+`@ssh-manager/core` is a **symlink** in `node_modules`, not a normal dependency. A
+plain `npm install` treats it as extraneous and **prunes it**, which breaks remote
+roots with `Cannot find module '@ssh-manager/core'`. After any install, re-link:
+
+```bash
+npm run link-core
+```
+
+### Rebuild core after editing the ssh-manager source (remote only)
+
+md-reader loads core's **compiled** output (`packages/core/dist/`, set by core's
+`package.json` `main`), **not** the TypeScript source. So if you change
+`ssh-manager/packages/core/src/**`, you must rebuild its `dist/` or md-reader keeps
+running the old code:
+
+```bash
+# in the ssh-manager checkout:
+npm --prefix packages/core run build      # regenerate dist/
+# back in md-reader, restart so the server reloads it:
+systemctl --user restart md-reader-server   # or ./stop.sh && ./start.sh
+```
+
+`npm run link-core` also builds `dist/` if it's missing, but it won't rebuild an
+**out-of-date** one — after editing core source, build explicitly.
+
+### Confirm which repo the live service is using
+
+If behavior doesn't match the code you're editing, verify the running process's
+working directory (a stale systemd unit can point at an old clone):
+
+```bash
+ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd
+```
+
+If it's wrong, re-run `./systemd/install.sh` from the correct repo and restart
+(see [How the service path is set](#how-the-service-path-is-set-important)).
+
+### Logs
+
+```bash
+tail -f logs/server.log logs/client.log              # loose mode (./start.sh)
+journalctl --user -u md-reader-server -f             # systemd mode
+journalctl --user -u md-reader-client -f
+```
+
+### Changing folders / ports
+
+Edit `config.json`, then click **↺** in the sidebar — roots and ports apply without
+a restart (the server re-reads config and drops cached remote SSH connections). No
+redeploy needed for config-only changes.
+
+---
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -242,12 +433,15 @@ then run `wsl --shutdown` from Windows and reopen the shell. `systemctl is-syste
 | Browser shows "Loading…" forever | Check `logs/server.log` — usually the path in `config.json` doesn't exist |
 | `EADDRINUSE` in logs | Change `port` / `clientPort` in `config.json`, or kill the conflicting process (`ss -tlnp \| grep :PORT`) |
 | Sidebar is empty | Configured root has no `.md` / `.mdx` files (other types are hidden by design) |
-| Changes to `config.json` not showing | Click **↺** in the sidebar header to reload config (it's cached server-side). New `roots` / ports apply without a restart. |
+| Changes to `config.json` not showing | Click **↺** in the sidebar header to reload config (it's cached server-side). New `roots` / ports apply without a restart. If **↺** still does nothing, the running service is serving a different repo/clone — check its working dir: `ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd`, then re-run `./systemd/install.sh` from the correct repo and restart. |
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
 | API calls fail only from another site/tab | CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`. |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
 | Remote root shows an inline error / red row | The remote is offline, the `node` name isn't in `~/note/ssh_remote.json`, or credentials/`remotePath` are wrong. The API returns 503 for connectivity, 400 for a bad inventory entry. Fix and click **↺**. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
+| Edited ssh-manager core source but nothing changed | md-reader runs core's compiled `dist/`, not its `src/`. Rebuild: `npm --prefix packages/core run build` in the ssh-manager checkout, then restart the server. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
+| Pulled new code but behavior is unchanged | The backend caches code at startup — restart it (`systemctl --user restart md-reader-server` or `./stop.sh && ./start.sh`). |
+| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that `node` failed (offline / bad inventory entry / wrong `remotePath`). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
 | Client build fails reading `config.json` | `cp config.example.json config.json` first — Vite reads it at build time. |
 
 ---
@@ -273,7 +467,7 @@ md-reader/
 │   │   └── backend.js          # backend abstraction: LocalBackend (fs) + SftpBackend
 │   │                           #   (@ssh-manager/core, lazy-required); backendFor() picks one per root
 │   └── routes/
-│       ├── files.js            # GET tree (per-root, error node on failure); POST /new, /rename; DELETE
+│       ├── files.js            # GET /roots (metadata), GET /root/:id (one tree); POST /new, /rename; DELETE
 │       ├── content.js          # GET / PUT markdown body
 │       ├── upload.js           # POST multipart upload (multer)
 │       └── config.js           # POST /reload — re-read config.json + drop remote connections
@@ -306,7 +500,8 @@ missing file, **409** name clash, **503** remote unreachable.
 
 | Method | Path | Body / Query | Purpose |
 |---|---|---|---|
-| GET    | `/api/files` | — | Folder tree across all roots (a failing remote root becomes an error node, others still load) |
+| GET    | `/api/files/roots` | — | Root metadata only (id, name, type, node) — no SSH, builds the tabs instantly |
+| GET    | `/api/files/root/:id` | — | Folder tree for **one** root (503 if that remote is unreachable; other roots unaffected) |
 | POST   | `/api/files/new` | `{ folder, name }` | Create empty `.md` (auto-rename on conflict) |
 | POST   | `/api/files/rename` | `{ path, newName }` | Rename a file (409 on name clash) |
 | DELETE | `/api/files`  | `?path=...` | Delete one `.md`/`.mdx` (files only) |

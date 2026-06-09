@@ -13,6 +13,56 @@ function ensureMdName(name) {
   return MD_RE.test(name) ? name : `${name}.md`;
 }
 
+// Single-quote a string for a POSIX shell: wrap in '...' and escape embedded
+// quotes as '\''. Safe for arbitrary paths passed to a remote bash -lc.
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+// dirs before files, then locale name. Shared by both remote listing paths.
+function sortNodes(nodes) {
+  return nodes.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+// Reassemble a flat list of absolute remote file paths into a nested dir/file
+// tree rooted at `base`. Intermediate directories are created on demand; every
+// node's path is an opaque token so routes stay backend-agnostic.
+function treeFromPaths(base, paths, root) {
+  const rootChildren = [];
+  // Map of absolute dir path -> { node, children } so we can attach lazily.
+  const dirs = new Map();
+
+  const ensureDir = (absDir) => {
+    if (absDir === base) return rootChildren;
+    const existing = dirs.get(absDir);
+    if (existing) return existing.children;
+    const slash = absDir.lastIndexOf('/');
+    const parentPath = slash > base.length ? absDir.slice(0, slash) : base;
+    const name = absDir.slice(slash + 1);
+    const children = [];
+    const node = { name, path: encodeToken(root, absDir), type: 'dir', children };
+    dirs.set(absDir, { node, children });
+    ensureDir(parentPath).push(node);
+    return children;
+  };
+
+  for (const abs of paths) {
+    if (!abs.startsWith(`${base}/`) && abs !== base) continue;
+    const slash = abs.lastIndexOf('/');
+    const dirPath = slash > base.length ? abs.slice(0, slash) : base;
+    const name = abs.slice(slash + 1);
+    if (!MD_RE.test(name)) continue;
+    ensureDir(dirPath).push({ name, path: encodeToken(root, abs), type: 'file' });
+  }
+
+  // Sort every directory's children (and the root) depth-first.
+  for (const { children } of dirs.values()) sortNodes(children);
+  return sortNodes(rootChildren);
+}
+
 // A backend turns root-scoped operations into concrete reads/writes. Each
 // returned tree node's `path` is an opaque token (see paths.js) so routes never
 // need to know which machine a node lives on.
@@ -259,38 +309,70 @@ class SftpBackend extends Backend {
     return out;
   }
 
+  // Recursive SFTP walk — one round-trip per directory. Correct but O(dirs) in
+  // latency, so it's only used as a fallback for Windows remotes (no POSIX shell
+  // for the rg/find fast path). POSIX remotes go through listViaExec.
+  async listViaSftpWalk(rfs, root, base) {
+    const walk = async (dir, depth) => {
+      // Bound recursion so a pathologically deep (or symlink-confused) remote
+      // tree can't exhaust the stack or stall the request. Directories below
+      // the limit are still shown, just not descended into.
+      if (depth > MAX_REMOTE_DEPTH) return [];
+      const entries = await rfs.list(dir, { includeHidden: false });
+      const nodes = [];
+      for (const e of entries) {
+        if (e.type === 'dir') {
+          nodes.push({
+            name: e.name,
+            path: encodeToken(root, e.path),
+            type: 'dir',
+            children: await walk(e.path, depth + 1),
+          });
+        } else if (e.type === 'file' && MD_RE.test(e.name)) {
+          nodes.push({ name: e.name, path: encodeToken(root, e.path), type: 'file' });
+        }
+      }
+      return sortNodes(nodes);
+    };
+    return walk(base, 1);
+  }
+
+  // Fast path for POSIX remotes: a single `rg` (or `find` fallback) exec returns
+  // every .md/.mdx path at once, which we reassemble into a nested tree. This
+  // turns ~O(dirs) SFTP round-trips (minutes on a large home) into one command.
+  async listViaExec(session, root, base) {
+    const q = shellQuote(base);
+    // Default rg: honors .gitignore and skips hidden files/dirs — both desired,
+    // hidden files must never surface. `-- <base>` guards a base starting with '-'.
+    const rg = `rg --files -g '*.md' -g '*.mdx' -- ${q}`;
+    // find fallback for hosts without rg. `-not -path '*/.*'` mirrors rg's
+    // no-hidden behavior; 2>/dev/null drops permission-denied noise.
+    const find = `find ${q} -type f \\( -name '*.md' -o -name '*.mdx' \\) -not -path '*/.*' 2>/dev/null`;
+    // Try rg; on 127 (command not found) fall back to find. Run under bash -lc so
+    // login PATH (e.g. /home/openbmc/bin) and shell builtins resolve.
+    const cmd = `bash -lc ${shellQuote(`${rg} 2>/dev/null || { rc=$?; [ "$rc" = 127 ] && ${find}; }`)}`;
+    const { stdout } = await session.exec(cmd);
+    const paths = stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      // Drop anything under a dotfile/dotdir segment (defense in depth alongside
+      // rg/find filters), and anything that escaped the base.
+      .filter((p) => !/(^|\/)\.[^/]/.test(p.slice(base.length)));
+    return treeFromPaths(base, paths, root);
+  }
+
   async listTree(root) {
     return this.withFs(root, async (rfs) => {
       const base = await rfs.expandHome(root.remotePath || '~');
-      const walk = async (dir, depth) => {
-        // Bound recursion so a pathologically deep (or symlink-confused) remote
-        // tree can't exhaust the stack or stall the request. Directories below
-        // the limit are still shown, just not descended into.
-        if (depth > MAX_REMOTE_DEPTH) return [];
-        const entries = await rfs.list(dir, { includeHidden: false });
-        const nodes = [];
-        for (const e of entries) {
-          if (e.type === 'dir') {
-            nodes.push({
-              name: e.name,
-              path: encodeToken(root, e.path),
-              type: 'dir',
-              children: await walk(e.path, depth + 1),
-            });
-          } else if (e.type === 'file' && MD_RE.test(e.name)) {
-            nodes.push({ name: e.name, path: encodeToken(root, e.path), type: 'file' });
-          }
-        }
-        return nodes.sort((a, b) => {
-          if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
-      };
+      const children = rfs.session.os === 'windows'
+        ? await this.listViaSftpWalk(rfs, root, base)
+        : await this.listViaExec(rfs.session, root, base);
       return {
         name: root.name,
         path: encodeToken(root, base),
         type: 'root',
-        children: await walk(base, 1),
+        children,
       };
     });
   }
