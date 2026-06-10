@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import MarkdownViewer from './components/MarkdownViewer';
 import TocPanel from './components/TocPanel';
@@ -13,8 +13,18 @@ export default function App() {
   const [tocCollapsed, setTocCollapsed] = useState(false);
   const [draggingTarget, setDraggingTarget] = useState(null);
   const [headings, setHeadings] = useState([]);
+  const [readOnly, setReadOnly] = useState(false);
   const viewerScrollRef = useRef(null);
   const dirtyRef = useRef(false);
+
+  // Fetch the read-only flag once at startup. On failure we stay in the safe
+  // default (false) — reading must keep working even if settings can't load.
+  useEffect(() => {
+    fetch('/api/config/settings')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setReadOnly(d.readOnly === true); })
+      .catch(() => { /* keep default */ });
+  }, []);
 
   // Guard genuine file switches (tree clicks, opening a new file) so unsaved
   // edits aren't silently dropped. The confirm lives here — not in the viewer's
@@ -58,7 +68,7 @@ export default function App() {
   return (
     <div className={`app-layout${draggingTarget ? ' dragging' : ''}`}>
       <div className="sidebar-panel" style={{ width: sidebarWidth }}>
-        <Sidebar selectedFile={selectedFile} onSelect={requestSelect} />
+        <Sidebar selectedFile={selectedFile} onSelect={requestSelect} readOnly={readOnly} />
       </div>
       <div className="resize-handle" onMouseDown={handleSidebarDrag} />
       <div className="content-panel">
@@ -67,6 +77,7 @@ export default function App() {
           scrollRef={viewerScrollRef}
           onHeadingsChange={setHeadings}
           onDirtyChange={(d) => { dirtyRef.current = d; }}
+          readOnly={readOnly}
         />
       </div>
       {!tocCollapsed && (

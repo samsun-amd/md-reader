@@ -201,8 +201,9 @@ class LocalBackend extends Backend {
 
 // ---------------------------------------------------------------------------
 // SftpBackend — thin wrapper over @ssh-manager/core. core is required lazily so
-// a local-only install never needs it present. Connection details come from
-// ssh_remote.json via the shared Inventory; the root only names a node.
+// a local-only install never needs it present. Connection details are
+// self-contained on the root (host/port/user/password/os); no external
+// inventory is consulted.
 // ---------------------------------------------------------------------------
 // Max directory depth the remote tree walk will descend. Keeps a deep or
 // symlink-confused remote tree from exhausting the stack / stalling the request.
@@ -236,7 +237,7 @@ function withSftpStatus(err) {
 class SftpBackend extends Backend {
   constructor(shared) {
     super();
-    this.shared = shared; // { inventory, pool } lazily populated
+    this.shared = shared; // { pool } lazily populated
   }
 
   async core() {
@@ -245,14 +246,20 @@ class SftpBackend extends Backend {
 
   async endpointFor(root) {
     const core = await this.core();
-    if (!this.shared.inventory) this.shared.inventory = core.Inventory.load();
     if (!this.shared.pool) {
       this.shared.pool = new core.SshPool({ readyTimeoutMs: 15000, idleTimeoutMs: 60000 });
     }
     try {
-      return this.shared.inventory.resolve(root.node);
+      return core.adhocEndpoint({
+        host: root.host,
+        port: root.port,
+        user: root.user,
+        password: root.password,
+        os: root.os,
+        label: root.id,
+      });
     } catch (e) {
-      const err = new Error(`Inventory: ${e.message}`);
+      const err = new Error(`Remote root "${root.id}": ${e.message}`);
       err.status = 400;
       throw err;
     }
@@ -274,7 +281,7 @@ class SftpBackend extends Backend {
       if (e && e.status == null
         && (e instanceof core.SshConnectionError
           || /connection|timed out|unreachable|refused|ENOTFOUND/i.test(e.message))) {
-        const err = new Error(`Remote "${root.node}" unavailable: ${e.message}`);
+        const err = new Error(`Remote "${root.host}" unavailable: ${e.message}`);
         err.status = 503;
         throw err;
       }
@@ -473,8 +480,8 @@ class SftpBackend extends Backend {
   }
 }
 
-// Shared state for remote backends (one inventory + one pool process-wide).
-const sharedRemote = { inventory: null, pool: null };
+// Shared state for remote backends (one pool process-wide).
+const sharedRemote = { pool: null };
 const localBackend = new LocalBackend();
 const sftpBackend = new SftpBackend(sharedRemote);
 
@@ -482,13 +489,12 @@ function backendFor(root) {
   return root.type === 'remote' ? sftpBackend : localBackend;
 }
 
-// Drop cached inventory/pool so /api/config/reload picks up edits and frees
-// remote connections.
+// Drop the cached pool so /api/config/reload picks up edits and frees remote
+// connections.
 function resetRemote() {
   if (sharedRemote.pool) {
     try { sharedRemote.pool.closeAll(); } catch { /* ignore */ }
   }
-  sharedRemote.inventory = null;
   sharedRemote.pool = null;
 }
 

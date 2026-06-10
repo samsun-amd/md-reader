@@ -20,17 +20,24 @@ function slugId(name, fallback) {
 }
 
 // Normalize a raw config root into a consistent shape:
-//   { id, name, type: 'local'|'remote', path? , node?, remotePath? }
+//   local:  { id, name, type:'local', path }
+//   remote: { id, name, type:'remote', host, port, user, password, os, remotePath }
 // Back-compat: a bare { name, path } with no type is treated as local.
+// Remote connection details are self-contained in config.json (host/user/...);
+// no external inventory is consulted.
 function normalizeRoot(raw, index) {
   const type = raw.type || 'local';
   const id = raw.id || slugId(raw.name, `root${index + 1}`);
   if (type === 'remote') {
     return {
       id,
-      name: raw.name || raw.node || id,
+      name: raw.name || raw.host || id,
       type: 'remote',
-      node: raw.node,
+      host: raw.host,
+      port: raw.port && raw.port > 0 ? raw.port : 22,
+      user: raw.user,
+      password: raw.password,
+      os: raw.os === 'windows' ? 'windows' : 'posix',
       remotePath: raw.remotePath || '~',
     };
   }
@@ -42,16 +49,28 @@ function normalizeRoot(raw, index) {
   };
 }
 
-function readConfigFromDisk() {
-  const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  cfg.roots = (cfg.roots || []).map((r, i) => normalizeRoot(r, i));
+// Validate a list of normalized roots: unique ids and required remote fields.
+// Shared by startup config loading and the config-editing API so both enforce
+// the same rules. Throws on the first problem with a user-facing message.
+function validateRoots(roots) {
   const seen = new Set();
-  for (const r of cfg.roots) {
+  for (const r of roots) {
+    if (!r.id) throw new Error('Every root needs an id');
     if (seen.has(r.id)) {
       throw new Error(`Duplicate root id "${r.id}" in config.json (ids must be unique)`);
     }
     seen.add(r.id);
+    if (r.type === 'remote') {
+      if (!r.host) throw new Error(`Remote root "${r.id}" is missing required field "host"`);
+      if (!r.user) throw new Error(`Remote root "${r.id}" is missing required field "user"`);
+    }
   }
+}
+
+function readConfigFromDisk() {
+  const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  cfg.roots = (cfg.roots || []).map((r, i) => normalizeRoot(r, i));
+  validateRoots(cfg.roots);
   return cfg;
 }
 
@@ -188,9 +207,12 @@ function uniqueName(dir, filename) {
 }
 
 module.exports = {
+  CONFIG_PATH,
   expandHome,
   loadConfig,
   reloadConfig,
+  normalizeRoot,
+  validateRoots,
   rootById,
   isUnderRoot,
   isUnderSpecificRoot,

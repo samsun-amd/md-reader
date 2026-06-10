@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import FileTree from './FileTree';
+import ConfigModal from './ConfigModal';
 import './Sidebar.css';
 
 // Pull the owning root id out of an opaque path token (`<type>:<id>::<inner>`).
@@ -12,7 +13,7 @@ function rootIdOfToken(token) {
   return colon < 0 ? null : head.slice(colon + 1);
 }
 
-export default function Sidebar({ selectedFile, onSelect }) {
+export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   const [roots, setRoots] = useState([]);
   const [rootsError, setRootsError] = useState(null);
   // Per-root tree state: { [id]: { status: 'idle'|'loading'|'ready'|'error', tree, error } }
@@ -20,21 +21,22 @@ export default function Sidebar({ selectedFile, onSelect }) {
   const [tab, setTab] = useState('local'); // 'local' | 'remote'
   const [activeMachine, setActiveMachine] = useState(null); // remote node name
   const [toast, setToast] = useState(null);
+  const [showConfig, setShowConfig] = useState(false);
 
   const localRoots = useMemo(() => roots.filter((r) => r.type === 'local'), [roots]);
   const remoteRoots = useMemo(() => roots.filter((r) => r.type === 'remote'), [roots]);
 
-  // Group remote roots by machine (node). One machine can host several folder
+  // Group remote roots by machine (host). One machine can host several folder
   // roots, so a sub-tab is a machine and shows all of its roots together.
   const machines = useMemo(() => {
     const order = [];
-    const byNode = new Map();
+    const byHost = new Map();
     for (const r of remoteRoots) {
-      const key = r.node || r.id;
-      if (!byNode.has(key)) { byNode.set(key, []); order.push(key); }
-      byNode.get(key).push(r);
+      const key = r.host || r.id;
+      if (!byHost.has(key)) { byHost.set(key, []); order.push(key); }
+      byHost.get(key).push(r);
     }
-    return order.map((node) => ({ node, roots: byNode.get(node) }));
+    return order.map((node) => ({ node, roots: byHost.get(node) }));
   }, [remoteRoots]);
 
   const showToast = useCallback((msg, kind = 'info') => {
@@ -107,6 +109,14 @@ export default function Sidebar({ selectedFile, onSelect }) {
     }
     setTrees({});
     await loadRoots();
+  }, [loadRoots, showToast]);
+
+  // After the config editor changes roots, the server has already reloaded its
+  // config and dropped remote connections, so just rebuild the client view.
+  const refreshAfterConfig = useCallback(async () => {
+    setTrees({});
+    await loadRoots();
+    showToast('Roots updated');
   }, [loadRoots, showToast]);
 
   // Refresh whichever root a just-changed file belongs to.
@@ -211,13 +221,13 @@ export default function Sidebar({ selectedFile, onSelect }) {
         depth={0}
         selectedFile={selectedFile}
         onSelect={onSelect}
-        onUpload={uploadFiles}
-        onCreateFile={createFile}
-        onRenameFile={renameFile}
-        onDeleteFile={deleteFile}
+        onUpload={readOnly ? undefined : uploadFiles}
+        onCreateFile={readOnly ? undefined : createFile}
+        onRenameFile={readOnly ? undefined : renameFile}
+        onDeleteFile={readOnly ? undefined : deleteFile}
       />
     );
-  }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile, loadRoot]);
+  }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile, loadRoot, readOnly]);
 
   return (
     <div className="sidebar">
@@ -236,7 +246,12 @@ export default function Sidebar({ selectedFile, onSelect }) {
             Remote
           </button>
         </div>
-        <button className="refresh-btn" onClick={reloadConfig} title="Reload config & refresh">↺</button>
+        <div className="sidebar-header-actions">
+          {!readOnly && (
+            <button className="refresh-btn" onClick={() => setShowConfig(true)} title="Manage roots">⚙</button>
+          )}
+          <button className="refresh-btn" onClick={reloadConfig} title="Reload config & refresh">↺</button>
+        </div>
       </div>
 
       {tab === 'remote' && machines.length > 0 && (
@@ -277,6 +292,13 @@ export default function Sidebar({ selectedFile, onSelect }) {
 
       {toast && (
         <div className={`sidebar-toast ${toast.kind}`}>{toast.msg}</div>
+      )}
+
+      {showConfig && !readOnly && (
+        <ConfigModal
+          onClose={() => setShowConfig(false)}
+          onChanged={refreshAfterConfig}
+        />
       )}
     </div>
   );

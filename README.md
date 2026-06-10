@@ -83,6 +83,7 @@ The rest of this section explains each piece in detail.
     { "id": "work", "name": "Work Notes",    "type": "local", "path": "~/work/docs" },
     { "id": "wiki", "name": "Personal Wiki", "type": "local", "path": "~/wiki" }
   ],
+  "allowRemoteAccess": false,
   "port": 3001,
   "clientPort": 5174
 }
@@ -99,19 +100,59 @@ root:
 | `path` | yes (local) | Folder to browse. `~` expands to your home; absolute paths work too (`/mnt/c/Users/you/notes`). |
 
 - `port` = backend API port; `clientPort` = the URL you open in your browser.
+- `allowRemoteAccess` (default `false`) controls whether other machines can reach
+  the service — see [Allowing remote access](#allowing-remote-access).
 - Roots are grouped into **Local** / **Remote** tabs in the sidebar automatically —
   you keep one flat `roots` array, the UI does the grouping.
+
+> You don't have to hand-edit this file to manage roots — the **⚙ button** in the
+> sidebar opens a form-based editor. See [Managing roots from the UI](#managing-roots-from-the-ui).
 
 > **Back-compat:** a bare `{ "name": "...", "path": "..." }` (no `id`/`type`) still
 > works and is treated as local — but new configs should use the explicit form above.
 
 > `config.json` is **gitignored** — it stays local and never gets committed.
 
-> The server caches config on startup. After editing `config.json`, click **↺** in the sidebar header to reload it — no restart needed. (Reload also drops cached remote SSH connections, so edits to `~/note/ssh_remote.json` or remote roots take effect too.)
+> The server caches config on startup. After editing `config.json`, click **↺** in the sidebar header to reload it — no restart needed. (Reload also drops cached remote SSH connections, so edits to remote roots take effect too.) Changing `allowRemoteAccess` or the ports requires a restart, since those bind sockets at startup.
 
 > **Build gotcha:** the client's `vite.config.js` reads `config.json` at build
 > time (to learn the ports for the dev proxy). A `config.json` **must exist**
 > before you build or run the client, or the build fails. Copy the example first.
+
+---
+
+## Managing roots from the UI
+
+Instead of hand-editing `config.json`, click the **⚙** button in the sidebar
+header to open a form-based root manager — no JSON required. From there you can:
+
+- **Add** a local folder or a remote machine (separate **+ Add local** / **+ Add
+  remote** buttons).
+- **Edit** any existing root.
+- **Delete** a root (this only removes it from the sidebar; **no files are
+  deleted** on disk or on the remote).
+
+Each change is written straight to `config.json` (atomically), the server reloads
+its config, and the sidebar refreshes — no restart needed.
+
+### Passwords are write-only
+
+Remote SSH passwords are handled so the plaintext is **never sent back to the
+browser**:
+
+- The UI only ever knows *whether* a password is set (shown as `●●●●`), not what
+  it is.
+- When **editing** a remote root, the password field starts **blank**:
+  - **Leave it blank** → the existing password is kept unchanged.
+  - **Type a new value** → the password is replaced.
+  - **Tick "Clear saved password"** → the stored password is removed.
+
+The password is only used server-side to open the SFTP session, exactly as if you
+had typed it into `config.json` by hand.
+
+> The `allowRemoteAccess` flag and the ports are **not** editable here — they bind
+> sockets at startup, so changing them requires editing `config.json` and
+> restarting (see [Allowing remote access](#allowing-remote-access)).
 
 ---
 
@@ -125,7 +166,9 @@ machine's `.md` tree and you read/write its files directly over SFTP — no manu
 {
   "roots": [
     { "id": "docs", "name": "My Docs", "type": "local",  "path": "~/md" },
-    { "id": "srv",  "name": "Servant", "type": "remote", "node": "client", "remotePath": "~/notes" }
+    { "id": "srv",  "name": "Servant", "type": "remote",
+      "host": "10.0.0.5", "port": 22, "user": "root", "password": "changeme",
+      "os": "posix", "remotePath": "~/notes" }
   ],
   "port": 3001,
   "clientPort": 5174
@@ -134,33 +177,68 @@ machine's `.md` tree and you read/write its files directly over SFTP — no manu
 
 ### What a remote root is
 
-A remote root names a machine (`node`) plus a folder on it (`remotePath`). The
-server lists that folder's `.md`/`.mdx` files and reads/writes them over SFTP,
-exactly like a local root. Only `type:"remote"` roots ever touch the SSH
-library, so a purely local setup never needs it.
+A remote root carries its own SSH connection details (`host`/`user`/…) plus a
+folder on that machine (`remotePath`). The server lists that folder's
+`.md`/`.mdx` files and reads/writes them over SFTP, exactly like a local root.
+Only `type:"remote"` roots ever touch the SSH library, so a purely local setup
+never needs it. Connection details are **self-contained in `config.json`** — no
+external inventory file is consulted.
 
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | yes | Stable, **unique** identifier for the root (see "token model"). |
 | `type` | yes (`"remote"`) | Selects the SFTP backend. |
-| `node` | yes | Entry in `~/note/ssh_remote.json` — by **name**, **number**, or **IP**. The same inventory `sshm` uses; credentials live there, not in `config.json`. Server sub-targets work too (e.g. a host behind a BMC) via the core selectors. |
+| `host` | yes | Hostname or IP of the remote machine. |
+| `user` | yes | SSH username. |
+| `password` | no | SSH password. (Key-based auth is not supported.) |
+| `port` | no (default `22`) | SSH port. |
+| `os` | no (default `posix`) | `"posix"` or `"windows"`. Windows remotes work too — SFTP is OS-agnostic. |
 | `remotePath` | no (default `~`) | Folder on that machine. `~` expands to the **remote** home, not yours. |
 
-- Windows remotes work too — SFTP is OS-agnostic, no special handling.
-- The inventory file path can be overridden with `SSH_REMOTE_JSON`; otherwise it
-  defaults to `~/note/ssh_remote.json`.
+> ⚠️ Remote credentials live in `config.json`, which is **gitignored** — never
+> commit a `config.json` containing real passwords. The password is used only
+> server-side to open the SFTP session and is never sent to the browser.
+
+---
+
+## Allowing remote access
+
+By default the service is **localhost-only**: the API binds `127.0.0.1`, the Vite
+client binds `localhost`, and CORS rejects non-local origins. This is the right
+setting for production, where the app should not be reachable from other machines.
+
+For testing from **another computer**, set `allowRemoteAccess: true` in
+`config.json`:
+
+```json
+{ "roots": [ /* … */ ], "allowRemoteAccess": true, "port": 3001, "clientPort": 5174 }
+```
+
+When enabled:
+
+- the API server binds `0.0.0.0` (reachable on every interface),
+- the Vite client binds `0.0.0.0`, and
+- CORS accepts **all** origins.
+
+Then open `http://<this-machine-ip>:<clientPort>` from the other computer.
+
+> ⚠️ This applies **no authentication** — anyone who can reach the host/port can
+> read and write your configured roots. Only enable it on a **trusted private
+> network or VPN**, and set it back to `false` for production. Changing this flag
+> requires a **restart** (it binds sockets at startup; the **↺** reload won't pick
+> it up).
 
 ### Sidebar: Local / Remote tabs
 
 `config.json` stays a single flat `roots` array — the sidebar groups it for you:
 
 - A **Local** and a **Remote** tab split roots by `type`.
-- Under **Remote**, one **sub-tab per machine** (`node`). Several roots that share
-  a `node` (e.g. `~/notes` and `~/docs` on the same box) appear together under that
+- Under **Remote**, one **sub-tab per machine** (`host`). Several roots that share
+  a `host` (e.g. `~/notes` and `~/docs` on the same box) appear together under that
   machine's sub-tab, so you always know whose file system you're looking at.
 
 So to add another folder on an existing machine, just add another `type:"remote"`
-root with the same `node` and a different `id`/`remotePath` — no nesting needed.
+root with the same `host` and a different `id`/`remotePath` — no nesting needed.
 
 ### Each root loads independently
 
@@ -435,13 +513,13 @@ redeploy needed for config-only changes.
 | Sidebar is empty | Configured root has no `.md` / `.mdx` files (other types are hidden by design) |
 | Changes to `config.json` not showing | Click **↺** in the sidebar header to reload config (it's cached server-side). New `roots` / ports apply without a restart. If **↺** still does nothing, the running service is serving a different repo/clone — check its working dir: `ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd`, then re-run `./systemd/install.sh` from the correct repo and restart. |
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
-| API calls fail only from another site/tab | CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`. |
+| API calls fail only from another site/tab | By default CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`, or set `allowRemoteAccess: true` (and restart) to allow other machines — see [Allowing remote access](#allowing-remote-access). |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
-| Remote root shows an inline error / red row | The remote is offline, the `node` name isn't in `~/note/ssh_remote.json`, or credentials/`remotePath` are wrong. The API returns 503 for connectivity, 400 for a bad inventory entry. Fix and click **↺**. |
+| Remote root shows an inline error / red row | The remote is offline, or the `host`/`user`/`password`/`remotePath` is wrong. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Fix it via the **⚙** root editor (or in `config.json`) and retry. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
 | Edited ssh-manager core source but nothing changed | md-reader runs core's compiled `dist/`, not its `src/`. Rebuild: `npm --prefix packages/core run build` in the ssh-manager checkout, then restart the server. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
 | Pulled new code but behavior is unchanged | The backend caches code at startup — restart it (`systemctl --user restart md-reader-server` or `./stop.sh && ./start.sh`). |
-| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that `node` failed (offline / bad inventory entry / wrong `remotePath`). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
+| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that machine (`host`) failed (offline / wrong credentials / wrong `remotePath`). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
 | Client build fails reading `config.json` | `cp config.example.json config.json` first — Vite reads it at build time. |
 
 ---
@@ -526,7 +604,8 @@ specific root's** boundary:
 - Names for uploaded/created/renamed files are reduced to a basename, stripping
   any directory components.
 - Only reads/writes/deletes `.md` / `.mdx` files.
-- Restricts **CORS to the local client** (`localhost` / `127.0.0.1` / `[::1]`, plus non-browser tools that send no `Origin`), so a random website you visit can't drive the file API through your browser.
+- By default restricts **CORS to the local client** (`localhost` / `127.0.0.1` / `[::1]`, plus non-browser tools that send no `Origin`), so a random website you visit can't drive the file API through your browser. Setting `allowRemoteAccess: true` relaxes this to all origins for trusted-network testing — see [Allowing remote access](#allowing-remote-access).
 
-There is no auth — this is meant to run locally on your own machine. Remote SSH
-credentials are **never** stored here; they come from `~/note/ssh_remote.json`.
+There is no auth — by default this runs locally on your own machine. Remote SSH
+credentials are stored in `config.json` (gitignored) and used only server-side to
+open the SFTP session; they are never sent to the browser.

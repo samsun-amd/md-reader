@@ -130,7 +130,7 @@ const MODE_READ = 'read';
 const MODE_SPLIT = 'split';
 const MODE_EDIT = 'edit';
 
-export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, onDirtyChange }) {
+export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, onDirtyChange, readOnly = false }) {
   const [savedContent, setSavedContent] = useState('');
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -152,6 +152,12 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
   }, []);
   const doUndo = useCallback(() => editorApiRef.current?.undo(), []);
   const doRedo = useCallback(() => editorApiRef.current?.redo(), []);
+
+  // In read-only mode the editor is never available; force Read so an edit/split
+  // view can't linger if the flag flips on.
+  useEffect(() => {
+    if (readOnly && mode !== MODE_READ) setMode(MODE_READ);
+  }, [readOnly, mode]);
 
   // Report dirty state to the parent, which guards file switches against
   // discarding unsaved edits (see App.requestSelect).
@@ -345,25 +351,31 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
               >↷</button>
             </div>
           )}
-          <div className="mode-toggle" role="group">
-            {[MODE_READ, MODE_SPLIT, MODE_EDIT].map((m) => (
+          {readOnly ? (
+            <span className="read-only-badge" title="Server is in read-only mode">Read-only</span>
+          ) : (
+            <>
+              <div className="mode-toggle" role="group">
+                {[MODE_READ, MODE_SPLIT, MODE_EDIT].map((m) => (
+                  <button
+                    key={m}
+                    className={`mode-btn${mode === m ? ' active' : ''}`}
+                    onClick={() => setMode(m)}
+                  >
+                    {m === MODE_READ ? 'Read' : m === MODE_SPLIT ? 'Split' : 'Edit'}
+                  </button>
+                ))}
+              </div>
               <button
-                key={m}
-                className={`mode-btn${mode === m ? ' active' : ''}`}
-                onClick={() => setMode(m)}
+                className="save-btn"
+                onClick={save}
+                disabled={!dirty || saving || mode === MODE_READ}
+                title="Save (Ctrl+S)"
               >
-                {m === MODE_READ ? 'Read' : m === MODE_SPLIT ? 'Split' : 'Edit'}
+                {saving ? 'Saving…' : 'Save'}
               </button>
-            ))}
-          </div>
-          <button
-            className="save-btn"
-            onClick={save}
-            disabled={!dirty || saving || mode === MODE_READ}
-            title="Save (Ctrl+S)"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+            </>
+          )}
         </div>
       </div>
       {saveError && <div className="viewer-status error">Save failed: {saveError}</div>}

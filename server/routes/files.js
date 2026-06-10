@@ -21,11 +21,13 @@ function validName(name) {
 router.get('/roots', (req, res) => {
   let config;
   try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  // Never expose remote credentials (password) to the client; host is needed
+  // only so the sidebar can group roots by machine.
   res.json(config.roots.map((r) => ({
     id: r.id,
     name: r.name,
     type: r.type,
-    node: r.node || null,
+    host: r.host || null,
   })));
 });
 

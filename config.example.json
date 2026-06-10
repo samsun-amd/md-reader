@@ -1,8 +1,9 @@
 {
   "roots": [
     { "id": "docs", "name": "My Docs", "type": "local", "path": "~/md" },
-    { "id": "srv", "name": "Servant", "type": "remote", "node": "client", "remotePath": "~/notes" }
+    { "id": "srv", "name": "Servant", "type": "remote", "host": "10.0.0.5", "port": 22, "user": "root", "password": "changeme", "os": "posix", "remotePath": "~/notes" }
   ],
+  "allowRemoteAccess": false,
   "port": 3001,
   "clientPort": 5174
 }
