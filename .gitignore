@@ -7,3 +7,9 @@ run/
 
 # Local config (paths/ports are user-specific). Use config.example.json as a template.
 config.json
+
+# Editor swap/backup files
+*.swp
+*.swo
+*.swn
+*~
