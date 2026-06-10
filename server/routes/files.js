@@ -22,12 +22,14 @@ router.get('/roots', (req, res) => {
   let config;
   try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
   // Never expose remote credentials (password) to the client; host is needed
-  // only so the sidebar can group roots by machine.
+  // only so the sidebar can group roots by machine, and machineName is the
+  // optional friendly label shown on the machine sub-tab.
   res.json(config.roots.map((r) => ({
     id: r.id,
     name: r.name,
     type: r.type,
     host: r.host || null,
+    machineName: r.machineName || null,
   })));
 });
 

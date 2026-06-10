@@ -48,6 +48,9 @@ function toStoredRoot(input, resolvedPassword) {
       os: input.os === 'windows' ? 'windows' : 'posix',
       remotePath: (input.remotePath && String(input.remotePath).trim()) || '~',
     };
+    // Only persist machineName when set; an empty value means "fall back to host".
+    const machineName = input.machineName ? String(input.machineName).trim() : '';
+    if (machineName) root.machineName = machineName;
     // Only persist a password when one is actually set (non-empty).
     if (resolvedPassword) root.password = resolvedPassword;
     return root;
@@ -112,6 +115,7 @@ function rootsForClient(raw) {
         name: r.name || r.host || r.id,
         type: 'remote',
         host: r.host || '',
+        machineName: r.machineName || '',
         port: r.port && Number(r.port) > 0 ? Number(r.port) : 22,
         user: r.user || '',
         os: r.os === 'windows' ? 'windows' : 'posix',

@@ -167,7 +167,8 @@ machine's `.md` tree and you read/write its files directly over SFTP — no manu
   "roots": [
     { "id": "docs", "name": "My Docs", "type": "local",  "path": "~/md" },
     { "id": "srv",  "name": "Servant", "type": "remote",
-      "host": "10.0.0.5", "port": 22, "user": "root", "password": "changeme",
+      "host": "10.0.0.5", "machineName": "Servant Box", "port": 22,
+      "user": "root", "password": "changeme",
       "os": "posix", "remotePath": "~/notes" }
   ],
   "port": 3001,
@@ -189,6 +190,7 @@ external inventory file is consulted.
 | `id` | yes | Stable, **unique** identifier for the root (see "token model"). |
 | `type` | yes (`"remote"`) | Selects the SFTP backend. |
 | `host` | yes | Hostname or IP of the remote machine. |
+| `machineName` | no | Friendly label shown on the machine's sub-tab. Falls back to `host` when empty. Purely cosmetic — grouping and the SSH connection still key on `host`. |
 | `user` | yes | SSH username. |
 | `password` | no | SSH password. (Key-based auth is not supported.) |
 | `port` | no (default `22`) | SSH port. |
@@ -236,6 +238,9 @@ Then open `http://<this-machine-ip>:<clientPort>` from the other computer.
 - Under **Remote**, one **sub-tab per machine** (`host`). Several roots that share
   a `host` (e.g. `~/notes` and `~/docs` on the same box) appear together under that
   machine's sub-tab, so you always know whose file system you're looking at.
+- The sub-tab is labelled with the machine's `machineName` if set (the first
+  non-empty one among that host's roots); otherwise it shows the raw `host`. This
+  is display-only — set it to give an IP-only machine a readable name.
 
 So to add another folder on an existing machine, just add another `type:"remote"`
 root with the same `host` and a different `id`/`remotePath` — no nesting needed.

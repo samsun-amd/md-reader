@@ -19,7 +19,7 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   // Per-root tree state: { [id]: { status: 'idle'|'loading'|'ready'|'error', tree, error } }
   const [trees, setTrees] = useState({});
   const [tab, setTab] = useState('local'); // 'local' | 'remote'
-  const [activeMachine, setActiveMachine] = useState(null); // remote node name
+  const [activeMachine, setActiveMachine] = useState(null); // host key of active sub-tab
   const [toast, setToast] = useState(null);
   const [showConfig, setShowConfig] = useState(false);
 
@@ -28,6 +28,9 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
 
   // Group remote roots by machine (host). One machine can host several folder
   // roots, so a sub-tab is a machine and shows all of its roots together.
+  // The sub-tab label uses the first non-empty machineName among the host's
+  // roots, falling back to the host itself when none is set. Grouping/identity
+  // still keys on host so roots on the same box share a connection and sub-tab.
   const machines = useMemo(() => {
     const order = [];
     const byHost = new Map();
@@ -36,7 +39,11 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
       if (!byHost.has(key)) { byHost.set(key, []); order.push(key); }
       byHost.get(key).push(r);
     }
-    return order.map((node) => ({ node, roots: byHost.get(node) }));
+    return order.map((key) => {
+      const rootsForHost = byHost.get(key);
+      const named = rootsForHost.find((r) => r.machineName);
+      return { key, label: named ? named.machineName : key, roots: rootsForHost };
+    });
   }, [remoteRoots]);
 
   const showToast = useCallback((msg, kind = 'info') => {
@@ -83,13 +90,13 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
 
   // Default the active machine sub-tab to the first one once roots arrive.
   useEffect(() => {
-    if (activeMachine == null && machines.length) setActiveMachine(machines[0].node);
+    if (activeMachine == null && machines.length) setActiveMachine(machines[0].key);
   }, [machines, activeMachine]);
 
   // Lazily load every root of the active machine when its sub-tab is shown.
   useEffect(() => {
     if (tab !== 'remote' || !activeMachine) return;
-    const m = machines.find((x) => x.node === activeMachine);
+    const m = machines.find((x) => x.key === activeMachine);
     if (!m) return;
     for (const r of m.roots) {
       if (!trees[r.id]) loadRoot(r.id);
@@ -258,12 +265,12 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
         <div className="sidebar-subtabs">
           {machines.map((m) => (
             <button
-              key={m.node}
-              className={`sidebar-subtab${activeMachine === m.node ? ' active' : ''}`}
-              onClick={() => setActiveMachine(m.node)}
-              title={m.node}
+              key={m.key}
+              className={`sidebar-subtab${activeMachine === m.key ? ' active' : ''}`}
+              onClick={() => setActiveMachine(m.key)}
+              title={m.label === m.key ? m.key : `${m.label} (${m.key})`}
             >
-              {m.node}
+              {m.label}
             </button>
           ))}
         </div>
@@ -282,7 +289,7 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
           machines.length === 0
             ? <div className="sidebar-status">No remote roots configured.</div>
             : activeMachine && (() => {
-              const m = machines.find((x) => x.node === activeMachine);
+              const m = machines.find((x) => x.key === activeMachine);
               if (!m) return null;
               // One machine can host several folder roots — show them all.
               return m.roots.map((r) => <div key={r.id}>{renderRoot(r)}</div>);

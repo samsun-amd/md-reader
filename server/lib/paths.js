@@ -21,7 +21,7 @@ function slugId(name, fallback) {
 
 // Normalize a raw config root into a consistent shape:
 //   local:  { id, name, type:'local', path }
-//   remote: { id, name, type:'remote', host, port, user, password, os, remotePath }
+//   remote: { id, name, type:'remote', host, machineName, port, user, password, os, remotePath }
 // Back-compat: a bare { name, path } with no type is treated as local.
 // Remote connection details are self-contained in config.json (host/user/...);
 // no external inventory is consulted.
@@ -34,6 +34,9 @@ function normalizeRoot(raw, index) {
       name: raw.name || raw.host || id,
       type: 'remote',
       host: raw.host,
+      // Optional friendly label for the machine sub-tab; the sidebar falls back
+      // to host when empty. Connection/grouping still keys on host.
+      machineName: raw.machineName || '',
       port: raw.port && raw.port > 0 ? raw.port : 22,
       user: raw.user,
       password: raw.password,

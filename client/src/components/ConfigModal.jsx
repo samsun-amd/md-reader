@@ -3,7 +3,7 @@ import './ConfigModal.css';
 
 const EMPTY_LOCAL = { type: 'local', id: '', name: '', path: '' };
 const EMPTY_REMOTE = {
-  type: 'remote', id: '', name: '', host: '', port: 22,
+  type: 'remote', id: '', name: '', host: '', machineName: '', port: 22,
   user: '', password: '', clearPassword: false, os: 'posix', remotePath: '~',
 };
 
@@ -81,6 +81,7 @@ export default function ConfigModal({ onClose, onChanged }) {
     if (d.type === 'remote') {
       Object.assign(body, {
         host: d.host.trim(),
+        machineName: d.machineName.trim(),
         port: Number(d.port) > 0 ? Number(d.port) : 22,
         user: d.user.trim(),
         os: d.os === 'windows' ? 'windows' : 'posix',
@@ -175,7 +176,7 @@ export default function ConfigModal({ onClose, onChanged }) {
               ? <div className="cfg-empty">No remote roots.</div>
               : remoteRoots.map((r) => (
                 <RootRow key={r.id} root={r}
-                  summary={`${r.user}@${r.host}:${r.remotePath}`}
+                  summary={`${r.user}@${r.machineName ? `${r.machineName} (${r.host})` : r.host}:${r.remotePath}`}
                   badge={r.hasPassword ? '●●●●' : 'no password'}
                   onEdit={() => startEdit(r)} onDelete={() => remove(r)} disabled={busy} />
               ))}
@@ -253,6 +254,13 @@ function RootForm({ draft, error, busy, onField, onSubmit, onCancel }) {
                 onChange={(e) => onField('port', e.target.value)} placeholder="22" />
             </label>
           </div>
+
+          <label className="cfg-field">
+            <span>Machine name</span>
+            <input value={draft.machineName}
+              onChange={(e) => onField('machineName', e.target.value)}
+              placeholder="Sub-tab label (defaults to host)" />
+          </label>
 
           <label className="cfg-field">
             <span>User</span>
