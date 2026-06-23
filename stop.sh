@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # Stop MD Reader.
 #
-# Mirrors start.sh: uses systemd user units if installed, otherwise
-# falls back to PID-file based shutdown.
+# Mirrors start.sh: uses systemd user units if installed and the user bus is
+# reachable, otherwise falls back to PID-file based shutdown.
 
+set -e
 cd "$(dirname "$0")"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-if command -v systemctl >/dev/null 2>&1 \
-   && [ -f "$UNIT_DIR/md-reader-server.service" ] \
+if [ -f "$UNIT_DIR/md-reader-server.service" ] \
    && [ -f "$UNIT_DIR/md-reader-client.service" ]; then
-  echo "Stopping via systemd..."
-  systemctl --user stop md-reader-client.service md-reader-server.service
-  echo "Done."
-  exit 0
+  if systemctl --user is-system-running >/dev/null 2>&1 \
+     || systemctl --user status >/dev/null 2>&1; then
+    echo "Stopping via systemd..."
+    systemctl --user stop md-reader-client.service md-reader-server.service
+    echo "Done."
+    exit 0
+  else
+    echo "WARNING: systemd units are installed but user bus is unreachable; falling back to PID files." >&2
+  fi
 fi
 
 stop_one() {
