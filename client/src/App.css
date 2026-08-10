@@ -12,6 +12,8 @@
 
 .sidebar-panel {
   flex-shrink: 0;
+  /* ponytail: cap side panels so the content pane always keeps ~40vw */
+  max-width: 30vw;
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
@@ -41,6 +43,7 @@
 
 .toc-panel-wrapper {
   flex-shrink: 0;
+  max-width: 30vw;
   display: flex;
   flex-direction: column;
   overflow: hidden;
