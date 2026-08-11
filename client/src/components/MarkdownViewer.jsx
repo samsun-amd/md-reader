@@ -178,6 +178,7 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
   const [saveError, setSaveError] = useState(null);
   const [history, setHistory] = useState({ canUndo: false, canRedo: false });
   const [editorReady, setEditorReady] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const internalRef = useRef(null);
   const bodyRef = scrollRef || internalRef;
   const editorApiRef = useRef(null);
@@ -201,19 +202,29 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
   // discarding unsaved edits (see App.requestSelect).
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
+  // Bumping reloadKey re-runs this, which is how Refresh re-reads the file.
+  // no-store keeps a revalidation-free browser cache from serving the copy we
+  // are explicitly trying to replace.
   useEffect(() => {
     if (!filePath) { setContent(''); setSavedContent(''); return; }
     setLoading(true);
     setError(null);
     setSaveError(null);
-    fetch(`/api/content?path=${encodeURIComponent(filePath)}`)
+    fetch(`/api/content?path=${encodeURIComponent(filePath)}`, { cache: 'no-store' })
       .then((r) => {
         if (!r.ok) return r.json().then((d) => { throw new Error(d.error || r.statusText); });
         return r.text();
       })
       .then((text) => { setContent(text); setSavedContent(text); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
-  }, [filePath]);
+  }, [filePath, reloadKey]);
+
+  // Discarding unsaved edits is the one destructive thing Refresh can do, so
+  // it is the one case we ask about.
+  const refresh = useCallback(() => {
+    if (dirty && !window.confirm('Discard unsaved changes and reload from disk?')) return;
+    setReloadKey((k) => k + 1);
+  }, [dirty]);
 
   // The editor only exists in edit/split mode. When it unmounts, drop the
   // stale view handle and history flags so the toolbar reflects reality.
@@ -371,6 +382,16 @@ export default function MarkdownViewer({ filePath, scrollRef, onHeadingsChange, 
           {filePath}
         </span>
         <div className="viewer-actions">
+          {/* Anchored leftmost: Refresh is the only control present in every
+              mode, so it keeps a fixed spot while the rest of the bar swaps
+              between edit controls and the read-only badge. */}
+          <button
+            className="history-btn"
+            onClick={refresh}
+            disabled={loading}
+            title="Reload this file from disk"
+            aria-label="Refresh"
+          >↻</button>
           {mode !== MODE_READ && (
             <div className="history-controls" role="group">
               <button
