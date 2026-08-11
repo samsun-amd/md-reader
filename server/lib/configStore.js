@@ -1,5 +1,7 @@
 const fs = require('fs');
-const { CONFIG_PATH, normalizeRoot, validateRoots } = require('./paths');
+const {
+  CONFIG_PATH, normalizeRoot, validateRoots, validateRawPins,
+} = require('./paths');
 
 // configStore centralizes reading/writing config.json for the editing API.
 // Unlike paths.loadConfig (which returns a NORMALIZED, cached view), this layer
@@ -24,6 +26,8 @@ function readRawConfig() {
 function writeRawConfig(cfg) {
   // Validate using the same rules as startup, on the normalized projection.
   validateRoots((cfg.roots || []).map((r, i) => normalizeRoot(r, i)));
+  // ...plus a check on the raw form, which normalizeRoot would have sanitized away.
+  validateRawPins(cfg.roots);
   const tmp = `${CONFIG_PATH}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
   fs.renameSync(tmp, CONFIG_PATH);
@@ -33,12 +37,16 @@ function writeRawConfig(cfg) {
 // Build the raw stored form of a root from a client input object. Only the
 // fields relevant to the type are kept; unknown fields are dropped. Password
 // handling (sentinel) is resolved by the caller and passed in via `password`.
-function toStoredRoot(input, resolvedPassword) {
+//
+// `pins` is NOT a form field — the caller passes the existing array through so
+// that editing a machine's connection details in the UI cannot erase its pins.
+// (This whitelist is exactly why it has to be threaded explicitly.)
+function toStoredRoot(input, resolvedPassword, pins) {
   const id = String(input.id || '').trim();
   const type = input.type === 'remote' ? 'remote' : 'local';
   const name = (input.name && String(input.name).trim()) || id;
-  if (type === 'remote') {
-    const root = {
+  const base = type === 'remote'
+    ? {
       id,
       name,
       type: 'remote',
@@ -46,21 +54,18 @@ function toStoredRoot(input, resolvedPassword) {
       port: input.port && Number(input.port) > 0 ? Number(input.port) : 22,
       user: input.user ? String(input.user).trim() : '',
       os: input.os === 'windows' ? 'windows' : 'posix',
-      remotePath: (input.remotePath && String(input.remotePath).trim()) || '~',
+    }
+    : {
+      id,
+      name,
+      type: 'local',
+      path: input.path ? String(input.path).trim() : '',
     };
-    // Only persist machineName when set; an empty value means "fall back to host".
-    const machineName = input.machineName ? String(input.machineName).trim() : '';
-    if (machineName) root.machineName = machineName;
-    // Only persist a password when one is actually set (non-empty).
-    if (resolvedPassword) root.password = resolvedPassword;
-    return root;
-  }
-  return {
-    id,
-    name,
-    type: 'local',
-    path: input.path ? String(input.path).trim() : '',
-  };
+  // Only persist a password when one is actually set (non-empty).
+  if (type === 'remote' && resolvedPassword) base.password = resolvedPassword;
+  // Only persist pins when there are some, so an unpinned root stays tidy.
+  if (Array.isArray(pins) && pins.length) base.pins = pins;
+  return base;
 }
 
 function findIndexById(roots, id) {
@@ -75,7 +80,7 @@ function addRoot(raw, input) {
   if (findIndexById(raw.roots, id) >= 0) throw badRequest(`Root id "${id}" already exists`);
   // New root: password sentinel doesn't apply — take whatever was sent.
   const password = typeof input.password === 'string' ? input.password : '';
-  raw.roots.push(toStoredRoot({ ...input, id }, password));
+  raw.roots.push(toStoredRoot({ ...input, id }, password, []));
   return raw;
 }
 
@@ -93,8 +98,34 @@ function updateRoot(raw, id, input) {
   } else {
     password = String(input.password);
   }
-  // id is immutable on edit; force the existing id.
-  raw.roots[idx] = toStoredRoot({ ...input, id, type: input.type || existing.type }, password);
+  // id is immutable on edit; force the existing id. Pins are carried over from
+  // the stored root, never taken from the request.
+  raw.roots[idx] = toStoredRoot(
+    { ...input, id, type: input.type || existing.type },
+    password,
+    existing.pins,
+  );
+  return raw;
+}
+
+// Add/remove a pinned folder. `rel` is a path relative to the root's base; the
+// caller is responsible for having validated containment first.
+function addPin(raw, id, rel) {
+  const idx = findIndexById(raw.roots, id);
+  if (idx < 0) { const e = new Error(`Unknown root id "${id}"`); e.status = 404; throw e; }
+  const root = raw.roots[idx];
+  const pins = Array.isArray(root.pins) ? root.pins : [];
+  if (!pins.includes(rel)) root.pins = [...pins, rel];
+  return raw;
+}
+
+function removePin(raw, id, rel) {
+  const idx = findIndexById(raw.roots, id);
+  if (idx < 0) { const e = new Error(`Unknown root id "${id}"`); e.status = 404; throw e; }
+  const root = raw.roots[idx];
+  const pins = (Array.isArray(root.pins) ? root.pins : []).filter((p) => p !== rel);
+  if (pins.length) root.pins = pins;
+  else delete root.pins;
   return raw;
 }
 
@@ -109,18 +140,18 @@ function removeRoot(raw, id) {
 // expose only hasPassword, never the plaintext.
 function rootsForClient(raw) {
   return (raw.roots || []).map((r) => {
+    const pins = Array.isArray(r.pins) ? r.pins : [];
     if (r.type === 'remote') {
       return {
         id: r.id,
         name: r.name || r.host || r.id,
         type: 'remote',
         host: r.host || '',
-        machineName: r.machineName || '',
         port: r.port && Number(r.port) > 0 ? Number(r.port) : 22,
         user: r.user || '',
         os: r.os === 'windows' ? 'windows' : 'posix',
-        remotePath: r.remotePath || '~',
         hasPassword: Boolean(r.password),
+        pins,
       };
     }
     return {
@@ -128,6 +159,7 @@ function rootsForClient(raw) {
       name: r.name || r.id,
       type: 'local',
       path: r.path || '',
+      pins,
     };
   });
 }
@@ -138,5 +170,7 @@ module.exports = {
   addRoot,
   updateRoot,
   removeRoot,
+  addPin,
+  removePin,
   rootsForClient,
 };

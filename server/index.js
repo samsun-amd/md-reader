@@ -37,13 +37,21 @@ app.use(express.json({ limit: '20mb' }));
 
 // Read-only mode: reject every mutating request before it reaches a route, so
 // even a direct API caller can't write. Method-based so it covers all current
-// and future write endpoints. POST /api/config/reload is exempt — it only
-// re-reads config from disk and has no side effects on user data.
+// and future write endpoints.
+//
+// Two exemptions, both navigation-only — neither can alter a document:
+//   - POST /config/reload        re-reads config.json from disk, no side effects
+//   - {POST,DELETE} .../pins     bookmarks a folder you can already browse
+// Read-only protects documents, and a pin is not a document. Note this does let
+// anyone who can reach the server change the pin list, which matters when
+// allowRemoteAccess binds 0.0.0.0 with no auth.
+const PINS_RE = /^\/config\/roots\/[^/]+\/pins$/;
 if (readOnly) {
   const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
   app.use('/api', (req, res, next) => {
     const isReload = req.method === 'POST' && req.path === '/config/reload';
-    if (WRITE_METHODS.has(req.method) && !isReload) {
+    const isPin = (req.method === 'POST' || req.method === 'DELETE') && PINS_RE.test(req.path);
+    if (WRITE_METHODS.has(req.method) && !isReload && !isPin) {
       return res.status(403).json({ error: 'Server is in read-only mode' });
     }
     return next();

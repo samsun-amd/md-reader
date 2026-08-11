@@ -1,5 +1,5 @@
 const express = require('express');
-const { reloadConfig } = require('../lib/paths');
+const { reloadConfig, safeRelPath } = require('../lib/paths');
 const { resetRemote } = require('../lib/backend');
 const {
   readRawConfig,
@@ -7,6 +7,8 @@ const {
   addRoot,
   updateRoot,
   removeRoot,
+  addPin,
+  removePin,
   rootsForClient,
 } = require('../lib/configStore');
 
@@ -37,7 +39,7 @@ router.post('/reload', (req, res) => {
         id: r.id,
         name: r.name,
         type: r.type,
-        path: r.type === 'remote' ? `${r.host}:${r.remotePath}` : r.path,
+        path: r.type === 'remote' ? `${r.user}@${r.host}` : r.path,
       })),
     });
   } catch (err) {
@@ -102,5 +104,25 @@ router.delete('/roots/:id', (req, res) => {
     res.status(statusOf(err)).json({ error: err.message });
   }
 });
+
+// POST / DELETE /api/config/roots/:id/pins   body: { rel }
+// `rel` is a folder path relative to the root's base. Pinning is metadata only
+// — it never touches the remote, so it works while a machine is offline.
+function pinHandler(mutate) {
+  return (req, res) => {
+    try {
+      const rel = safeRelPath((req.body || {}).rel);
+      const raw = readRawConfig();
+      mutate(raw, req.params.id, rel);
+      persist(raw);
+      res.json({ ok: true, roots: rootsForClient(raw) });
+    } catch (err) {
+      res.status(statusOf(err)).json({ error: err.message });
+    }
+  };
+}
+
+router.post('/roots/:id/pins', pinHandler(addPin));
+router.delete('/roots/:id/pins', pinHandler(removePin));
 
 module.exports = router;

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, Fragment } from 'react';
 import FileTree from './FileTree';
 import ConfigModal from './ConfigModal';
 import './Sidebar.css';
@@ -13,6 +13,40 @@ function rootIdOfToken(token) {
   return colon < 0 ? null : head.slice(colon + 1);
 }
 
+// The inner (real filesystem) path of a token, i.e. everything after '::'.
+// A root's path keeps whatever trailing slash its config had (`"path": "~/"`
+// yields `/home/me/`), so strip it — otherwise every prefix test below fails.
+function innerPathOfToken(token) {
+  if (typeof token !== 'string') return '';
+  const sep = token.indexOf('::');
+  if (sep < 0) return '';
+  return token.slice(sep + 2).replace(/\/+$/, '');
+}
+
+// Pins are stored relative to the root's base so config.json stays portable and
+// readable. The root tree node carries the expanded base in its own token, which
+// is what makes the conversion possible without asking the server.
+function relPathOf(rootNode, token) {
+  const base = innerPathOfToken(rootNode?.path);
+  const inner = innerPathOfToken(token);
+  if (!base || !inner || !inner.startsWith(`${base}/`)) return null;
+  return inner.slice(base.length + 1);
+}
+
+// Find the tree node for a pinned relative path inside an already-loaded root
+// tree. Pins are an alternate entry point into that tree, not a second data
+// source — so an expanded pin costs no extra request.
+function findNodeByRel(rootNode, rel) {
+  const segments = rel.split('/');
+  let node = rootNode;
+  for (const seg of segments) {
+    if (!node?.children) return null;
+    node = node.children.find((c) => c.name === seg && c.type === 'dir');
+    if (!node) return null;
+  }
+  return node;
+}
+
 export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   const [roots, setRoots] = useState([]);
   const [rootsError, setRootsError] = useState(null);
@@ -23,28 +57,19 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   const [toast, setToast] = useState(null);
   const [showConfig, setShowConfig] = useState(false);
 
+  // A remote root is a machine, one for one — it always opens at the remote
+  // home, and reaching a specific folder is what pins are for. So a sub-tab
+  // maps straight onto a root; no grouping step.
   const localRoots = useMemo(() => roots.filter((r) => r.type === 'local'), [roots]);
   const remoteRoots = useMemo(() => roots.filter((r) => r.type === 'remote'), [roots]);
 
-  // Group remote roots by machine (host). One machine can host several folder
-  // roots, so a sub-tab is a machine and shows all of its roots together.
-  // The sub-tab label uses the first non-empty machineName among the host's
-  // roots, falling back to the host itself when none is set. Grouping/identity
-  // still keys on host so roots on the same box share a connection and sub-tab.
-  const machines = useMemo(() => {
-    const order = [];
-    const byHost = new Map();
-    for (const r of remoteRoots) {
-      const key = r.host || r.id;
-      if (!byHost.has(key)) { byHost.set(key, []); order.push(key); }
-      byHost.get(key).push(r);
-    }
-    return order.map((key) => {
-      const rootsForHost = byHost.get(key);
-      const named = rootsForHost.find((r) => r.machineName);
-      return { key, label: named ? named.machineName : key, roots: rootsForHost };
-    });
-  }, [remoteRoots]);
+  // What the current tab shows: all local roots, or the one selected machine.
+  // Both the pinned block and the tree iterate this, so they can never disagree.
+  const visibleRoots = useMemo(() => {
+    if (tab === 'local') return localRoots;
+    const active = remoteRoots.find((r) => r.id === activeMachine);
+    return active ? [active] : [];
+  }, [tab, localRoots, remoteRoots, activeMachine]);
 
   const showToast = useCallback((msg, kind = 'info') => {
     setToast({ msg, kind });
@@ -90,18 +115,14 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
 
   // Default the active machine sub-tab to the first one once roots arrive.
   useEffect(() => {
-    if (activeMachine == null && machines.length) setActiveMachine(machines[0].key);
-  }, [machines, activeMachine]);
+    if (activeMachine == null && remoteRoots.length) setActiveMachine(remoteRoots[0].id);
+  }, [remoteRoots, activeMachine]);
 
-  // Lazily load every root of the active machine when its sub-tab is shown.
+  // Lazily load the active machine's tree when its sub-tab is first shown.
   useEffect(() => {
     if (tab !== 'remote' || !activeMachine) return;
-    const m = machines.find((x) => x.key === activeMachine);
-    if (!m) return;
-    for (const r of m.roots) {
-      if (!trees[r.id]) loadRoot(r.id);
-    }
-  }, [tab, activeMachine, machines, trees, loadRoot]);
+    if (!trees[activeMachine]) loadRoot(activeMachine);
+  }, [tab, activeMachine, trees, loadRoot]);
 
   // Re-read config.json on the server, then rebuild tabs and refresh only the
   // currently visible root (not every remote).
@@ -209,6 +230,34 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
     }
   }, [refreshRoot, showToast, selectedFile, onSelect]);
 
+  // Pin/unpin a folder. Pins live in config.json (server-side) so they follow
+  // the machine, not the browser. The tree itself is untouched — a pin is only
+  // a second way in — so there is nothing to reload but the root list.
+  const setPin = useCallback(async (rootId, rel, pinned) => {
+    try {
+      const r = await fetch(`/api/config/roots/${encodeURIComponent(rootId)}/pins`, {
+        method: pinned ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rel }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      await loadRoots();
+      showToast(pinned ? `Unpinned ${rel}` : `Pinned ${rel}`);
+    } catch (e) {
+      showToast(`${pinned ? 'Unpin' : 'Pin'} failed: ${e.message}`, 'error');
+    }
+  }, [loadRoots, showToast]);
+
+  // Toggle from a tree row, which knows a token but not its relative path.
+  const togglePin = useCallback((folderToken) => {
+    const id = rootIdOfToken(folderToken);
+    const rel = relPathOf(trees[id]?.tree, folderToken);
+    if (!id || !rel) { showToast('Cannot pin this folder', 'error'); return; }
+    const pinned = (roots.find((r) => r.id === id)?.pins || []).includes(rel);
+    setPin(id, rel, pinned);
+  }, [trees, roots, setPin, showToast]);
+
   const renderRoot = useCallback((rootMeta) => {
     const state = trees[rootMeta.id];
     if (!state || state.status === 'loading' || state.status === 'idle') {
@@ -232,9 +281,62 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
         onCreateFile={readOnly ? undefined : createFile}
         onRenameFile={readOnly ? undefined : renameFile}
         onDeleteFile={readOnly ? undefined : deleteFile}
+        onTogglePin={togglePin}
+        pinnedRels={rootMeta.pins}
+        rootNode={state.tree}
       />
     );
-  }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile, loadRoot, readOnly]);
+  }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile, loadRoot,
+    readOnly, togglePin]);
+
+  // The pinned block for one root. Renders straight out of the loaded tree, so
+  // it inherits that root's loading/error state instead of having its own.
+  // depth={1} makes each pin collapsed by default (FileTree opens only depth 0).
+  const renderPins = useCallback((rootMeta) => {
+    const pins = rootMeta.pins || [];
+    if (!pins.length) return null;
+    const state = trees[rootMeta.id];
+    return (
+      <div className="sidebar-pins">
+        <div className="sidebar-pins-title">Pinned</div>
+        {state?.status !== 'ready'
+          ? <div className="sidebar-status">Loading…</div>
+          : pins.map((rel) => {
+            const node = findNodeByRel(state.tree, rel);
+            // Folder gone (renamed/deleted on the machine). Say so and offer
+            // the only useful action rather than silently dropping the row.
+            if (!node) {
+              return (
+                <div key={rel} className="sidebar-pin-missing" title={`${rel} no longer exists`}>
+                  <span className="sidebar-pin-missing-name">{rel}</span>
+                  <button className="retry-btn" onClick={() => setPin(rootMeta.id, rel, true)}>
+                    Unpin
+                  </button>
+                </div>
+              );
+            }
+            return (
+              <FileTree
+                key={rel}
+                node={{ ...node, name: rel }}
+                depth={0}
+                defaultExpanded={false}
+                selectedFile={selectedFile}
+                onSelect={onSelect}
+                onUpload={readOnly ? undefined : uploadFiles}
+                onCreateFile={readOnly ? undefined : createFile}
+                onRenameFile={readOnly ? undefined : renameFile}
+                onDeleteFile={readOnly ? undefined : deleteFile}
+                onTogglePin={togglePin}
+                pinnedRels={pins}
+                rootNode={state.tree}
+              />
+            );
+          })}
+      </div>
+    );
+  }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile,
+    readOnly, togglePin, setPin]);
 
   return (
     <div className="sidebar">
@@ -261,40 +363,37 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
         </div>
       </div>
 
-      {tab === 'remote' && machines.length > 0 && (
+      {tab === 'remote' && remoteRoots.length > 0 && (
         <div className="sidebar-subtabs">
-          {machines.map((m) => (
+          {remoteRoots.map((r) => (
             <button
-              key={m.key}
-              className={`sidebar-subtab${activeMachine === m.key ? ' active' : ''}`}
-              onClick={() => setActiveMachine(m.key)}
-              title={m.label === m.key ? m.key : `${m.label} (${m.key})`}
+              key={r.id}
+              className={`sidebar-subtab${activeMachine === r.id ? ' active' : ''}`}
+              onClick={() => setActiveMachine(r.id)}
+              title={r.host ? `${r.name} (${r.host})` : r.name}
             >
-              {m.label}
+              {r.name}
             </button>
           ))}
         </div>
       )}
 
+      {/* Pinned block sits above the tree and below the tabs: fixed to the top
+          so its position never moves, growing downward with the pin count. */}
+      {!rootsError && visibleRoots.map((r) => (
+        <Fragment key={`pins-${r.id}`}>{renderPins(r)}</Fragment>
+      ))}
+
       <div className="sidebar-tree">
         {rootsError && <div className="sidebar-status error">{rootsError}</div>}
 
-        {!rootsError && tab === 'local' && (
-          localRoots.length === 0
-            ? <div className="sidebar-status">No local roots configured.</div>
-            : localRoots.map((r) => <div key={r.id}>{renderRoot(r)}</div>)
+        {!rootsError && tab === 'local' && localRoots.length === 0 && (
+          <div className="sidebar-status">No local roots configured.</div>
         )}
-
-        {!rootsError && tab === 'remote' && (
-          machines.length === 0
-            ? <div className="sidebar-status">No remote roots configured.</div>
-            : activeMachine && (() => {
-              const m = machines.find((x) => x.key === activeMachine);
-              if (!m) return null;
-              // One machine can host several folder roots — show them all.
-              return m.roots.map((r) => <div key={r.id}>{renderRoot(r)}</div>);
-            })()
+        {!rootsError && tab === 'remote' && remoteRoots.length === 0 && (
+          <div className="sidebar-status">No remote roots configured.</div>
         )}
+        {!rootsError && visibleRoots.map((r) => <div key={r.id}>{renderRoot(r)}</div>)}
       </div>
 
       {toast && (

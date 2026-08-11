@@ -18,6 +18,7 @@ A dark-mode Markdown reader/editor with a file-tree sidebar, a collapsible table
   - **Read / Split / Edit** toggle
   - Undo / Redo (Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z)
   - Save with the button or **Ctrl+S** (Cmd+S on macOS)
+  - **↻ Refresh** re-reads the open file from disk, so changes made elsewhere show up
   - Unsaved-change indicator (yellow dot), confirm-on-discard when switching files
 - **Table of contents** (right panel):
   - Auto-built from headings, nested by level
@@ -25,8 +26,10 @@ A dark-mode Markdown reader/editor with a file-tree sidebar, a collapsible table
   - Click to jump (smooth scroll, updates URL hash)
   - **Scrollspy**: current section highlighted as you scroll
 - **File management** directly from the sidebar:
-  - ⋯ menu on every row: **New file** (folders), **Rename**, **Delete** (files)
+  - ⋯ menu on every row: **New file** / **Pin folder** (folders), **Rename**, **Delete** (files)
   - **Drag & drop** one or many `.md` / `.mdx` files from your OS file manager onto any folder to upload them (auto-renames on conflict)
+- **Pinned folders**: keep the folders you live in at the top of the sidebar, per
+  machine, so a deeply nested directory is one click away — see [Pinned folders](#pinned-folders).
 - **Run as a service** via systemd user units (optional, see below).
 - **Dark mode** UI throughout.
 
@@ -102,6 +105,7 @@ root:
 - `port` = backend API port; `clientPort` = the URL you open in your browser.
 - `allowRemoteAccess` (default `false`) controls whether other machines can reach
   the service — see [Allowing remote access](#allowing-remote-access).
+- `readOnly` (default `false`) — see [Read-only mode](#read-only-mode).
 - Roots are grouped into **Local** / **Remote** tabs in the sidebar automatically —
   you keep one flat `roots` array, the UI does the grouping.
 
@@ -132,8 +136,14 @@ header to open a form-based root manager — no JSON required. From there you ca
 - **Delete** a root (this only removes it from the sidebar; **no files are
   deleted** on disk or on the remote).
 
+The root's `id` is derived from the **Name** you type and is immutable afterwards
+(it is what `config.json` and saved paths key on), so there is nothing extra to
+invent. Pinned folders are not shown in this form and are preserved across an
+edit — change a machine's password and its pins stay put.
+
 Each change is written straight to `config.json` (atomically), the server reloads
-its config, and the sidebar refreshes — no restart needed.
+its config, and the sidebar refreshes — no restart needed. The editor is hidden
+in [read-only mode](#read-only-mode).
 
 ### Passwords are write-only
 
@@ -158,18 +168,19 @@ had typed it into `config.json` by hand.
 
 ## Remote roots (read/write over SSH/SFTP)
 
-A root can point at a folder on **another machine**. The sidebar then shows that
-machine's `.md` tree and you read/write its files directly over SFTP — no manual
-`scp`. Local and remote roots can be mixed freely in the same `config.json`.
+A remote root is **a machine you can SSH to**. The sidebar shows that machine's
+`.md` tree starting at its home directory, and you read/write its files directly
+over SFTP — no manual `scp`. Local and remote roots can be mixed freely in the
+same `config.json`.
 
 ```json
 {
   "roots": [
     { "id": "docs", "name": "My Docs", "type": "local",  "path": "~/md" },
-    { "id": "srv",  "name": "Servant", "type": "remote",
-      "host": "10.0.0.5", "machineName": "Servant Box", "port": 22,
-      "user": "root", "password": "changeme",
-      "os": "posix", "remotePath": "~/notes" }
+    { "id": "servant", "name": "Servant", "type": "remote",
+      "host": "10.0.0.5", "port": 22,
+      "user": "root", "password": "changeme", "os": "posix",
+      "pins": ["notes", "projects/wiki"] }
   ],
   "port": 3001,
   "clientPort": 5174
@@ -178,24 +189,29 @@ machine's `.md` tree and you read/write its files directly over SFTP — no manu
 
 ### What a remote root is
 
-A remote root carries its own SSH connection details (`host`/`user`/…) plus a
-folder on that machine (`remotePath`). The server lists that folder's
-`.md`/`.mdx` files and reads/writes them over SFTP, exactly like a local root.
-Only `type:"remote"` roots ever touch the SSH library, so a purely local setup
-never needs it. Connection details are **self-contained in `config.json`** — no
-external inventory file is consulted.
+A remote root carries its own SSH connection details (`host`/`user`/…) and
+nothing else — **one entry per machine**. It always opens at the remote home
+directory; to jump straight to a folder you use often, [pin it](#pinned-folders)
+rather than adding a second entry. Only `type:"remote"` roots ever touch the SSH
+library, so a purely local setup never needs it. Connection details are
+**self-contained in `config.json`** — no external inventory file is consulted.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `id` | yes | Stable, **unique** identifier for the root (see "token model"). |
+| `id` | yes | Stable, **unique** identifier for the root (see "token model"). Derived from `name` when you add a machine through the ⚙ editor. |
+| `name` | yes | Label shown on the machine's sub-tab. |
 | `type` | yes (`"remote"`) | Selects the SFTP backend. |
 | `host` | yes | Hostname or IP of the remote machine. |
-| `machineName` | no | Friendly label shown on the machine's sub-tab. Falls back to `host` when empty. Purely cosmetic — grouping and the SSH connection still key on `host`. |
 | `user` | yes | SSH username. |
 | `password` | no | SSH password. (Key-based auth is not supported.) |
 | `port` | no (default `22`) | SSH port. |
 | `os` | no (default `posix`) | `"posix"` or `"windows"`. Windows remotes work too — SFTP is OS-agnostic. |
-| `remotePath` | no (default `~`) | Folder on that machine. `~` expands to the **remote** home, not yours. |
+| `pins` | no | Pinned folders, **relative to the root**, e.g. `["notes", "projects/wiki"]`. Usually managed from the UI. |
+
+> **Upgrading:** `remotePath` and `machineName` are no longer supported. A root
+> always opens at `~` and the sub-tab is labelled with `name`. Both keys are
+> ignored with a startup warning; if you relied on `remotePath` to open a
+> subfolder, pin that folder instead.
 
 > ⚠️ Remote credentials live in `config.json`, which is **gitignored** — never
 > commit a `config.json` containing real passwords. The password is used only
@@ -230,20 +246,53 @@ Then open `http://<this-machine-ip>:<clientPort>` from the other computer.
 > requires a **restart** (it binds sockets at startup; the **↺** reload won't pick
 > it up).
 
+## Read-only mode
+
+Set `readOnly: true` in `config.json` to serve documents without allowing edits.
+Every `POST` / `PUT` / `PATCH` / `DELETE` under `/api` is rejected with **403**
+before it reaches a route, so a direct API caller can't write either — not just
+the UI. The editor collapses to a **Read-only** badge and the ⚙ root manager is
+hidden.
+
+Two endpoints are exempt because neither can alter a document:
+
+- `POST /api/config/reload` — re-reads `config.json` from disk.
+- `POST` / `DELETE /api/config/roots/:id/pins` — [pinning](#pinned-folders) is
+  navigation, i.e. a bookmark for a folder you can already browse.
+
+> ⚠️ Combined with `allowRemoteAccess: true` (no auth), the pin exemption means
+> anyone who can reach the port can change the pin list. They still cannot read
+> or write anything outside your configured roots. Restart required after
+> changing `readOnly`.
+
 ### Sidebar: Local / Remote tabs
 
 `config.json` stays a single flat `roots` array — the sidebar groups it for you:
 
 - A **Local** and a **Remote** tab split roots by `type`.
-- Under **Remote**, one **sub-tab per machine** (`host`). Several roots that share
-  a `host` (e.g. `~/notes` and `~/docs` on the same box) appear together under that
-  machine's sub-tab, so you always know whose file system you're looking at.
-- The sub-tab is labelled with the machine's `machineName` if set (the first
-  non-empty one among that host's roots); otherwise it shows the raw `host`. This
-  is display-only — set it to give an IP-only machine a readable name.
+- Under **Remote**, one **sub-tab per machine**, labelled with the root's `name`
+  (hover to see the host), so you always know whose file system you're looking at.
 
-So to add another folder on an existing machine, just add another `type:"remote"`
-root with the same `host` and a different `id`/`remotePath` — no nesting needed.
+To reach a second folder on a machine you do **not** add a second root — pin it.
+
+### Pinned folders
+
+Each root can pin folders you open often. They appear in a block above the tree,
+so a folder ten levels down is one click away instead of ten.
+
+- Pin or unpin from the **⋯** menu on any folder row.
+- Pins are **per machine** and show only while that machine's sub-tab is active.
+- They start **collapsed**; the block grows with the number of pins and caps at
+  half the sidebar, scrolling internally beyond that.
+- They are stored in `config.json` as paths relative to the root (`"pins":
+  ["notes", "projects/wiki"]`), so they survive a browser change and can be
+  hand-edited.
+- A pin is a second way into the tree you already loaded — expanding one costs no
+  extra request. If the folder disappears on the machine, the row is struck
+  through with an **Unpin** button rather than vanishing silently.
+
+Pinning is exempt from [read-only mode](#read-only-mode): it is navigation, not a
+document edit.
 
 ### Each root loads independently
 
@@ -417,6 +466,8 @@ then run `wsl --shutdown` from Windows and reopen the shell.
 - Click a file in the left tree to render it in the middle.
 - The right TOC panel jumps you to any heading; the section under your cursor is highlighted as you scroll.
 - Drag the dividers between panels to resize. Click **✕** on the TOC header to collapse it (☰ re-expands it).
+- **↻** (viewer header) re-reads the current file from disk — use it after the file
+  changed elsewhere, e.g. a `git pull` or an edit on the remote machine.
 
 ### Editing
 - Use the **Read / Split / Edit** toggle at the top right of the viewer.
@@ -426,7 +477,7 @@ then run `wsl --shutdown` from Windows and reopen the shell.
 
 ### File management
 - **⋯ menu** on each tree row:
-  - Folders → **New file…** (auto-appends `.md` if you don't, opens immediately in the editor).
+  - Folders → **New file…** (auto-appends `.md` if you don't, opens immediately in the editor) and **Pin folder** / **Unpin folder**.
   - Files → **Rename…** or **Delete** (asks for confirmation).
 - **Drag & drop** files from Windows Explorer / Finder onto any folder row to upload them. Multiple files at once work. Same-named files are auto-renamed to `name (2).md`, `name (3).md`, … — nothing is ever overwritten.
 - Hit **↺** in the sidebar header to **reload `config.json`** on the server (picks up edited roots/ports without a restart) and re-scan the disk.
@@ -520,11 +571,12 @@ redeploy needed for config-only changes.
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
 | API calls fail only from another site/tab | By default CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`, or set `allowRemoteAccess: true` (and restart) to allow other machines — see [Allowing remote access](#allowing-remote-access). |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
-| Remote root shows an inline error / red row | The remote is offline, or the `host`/`user`/`password`/`remotePath` is wrong. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Fix it via the **⚙** root editor (or in `config.json`) and retry. |
+| Remote root shows an inline error / red row | The remote is offline, or the `host`/`user`/`password` is wrong. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Fix it via the **⚙** root editor (or in `config.json`) and retry. |
+| A pinned folder is struck through | That folder no longer exists on the machine (renamed or deleted). Click **Unpin** on the row, then pin the new location. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
 | Edited ssh-manager core source but nothing changed | md-reader runs core's compiled `dist/`, not its `src/`. Rebuild: `npm --prefix packages/core run build` in the ssh-manager checkout, then restart the server. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
 | Pulled new code but behavior is unchanged | The backend caches code at startup — restart it (`systemctl --user restart md-reader-server` or `./stop.sh && ./start.sh`). |
-| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that machine (`host`) failed (offline / wrong credentials / wrong `remotePath`). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
+| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that machine failed (offline / wrong credentials). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
 | Client build fails reading `config.json` | `cp config.example.json config.json` first — Vite reads it at build time. |
 
 ---
@@ -583,7 +635,7 @@ missing file, **409** name clash, **503** remote unreachable.
 
 | Method | Path | Body / Query | Purpose |
 |---|---|---|---|
-| GET    | `/api/files/roots` | — | Root metadata only (id, name, type, node) — no SSH, builds the tabs instantly |
+| GET    | `/api/files/roots` | — | Root metadata only (id, name, type, host, pins) — no SSH, builds the tabs instantly |
 | GET    | `/api/files/root/:id` | — | Folder tree for **one** root (503 if that remote is unreachable; other roots unaffected) |
 | POST   | `/api/files/new` | `{ folder, name }` | Create empty `.md` (auto-rename on conflict) |
 | POST   | `/api/files/rename` | `{ path, newName }` | Rename a file (409 on name clash) |
@@ -592,6 +644,13 @@ missing file, **409** name clash, **503** remote unreachable.
 | PUT    | `/api/content` | `{ path, content }` | Save edited markdown |
 | POST   | `/api/upload`  | multipart: `folder`, `files[]` | Upload one or many `.md`/`.mdx` |
 | POST   | `/api/config/reload` | — | Re-read `config.json` + drop cached remote connections |
+| GET    | `/api/config/settings` | — | Runtime flags the client needs at startup (currently `readOnly`) |
+| GET    | `/api/config/roots` | — | Roots for the ⚙ editor (passwords replaced by `hasPassword`) |
+| POST   | `/api/config/roots` | one root | Add a root |
+| PUT    | `/api/config/roots/:id` | one root | Edit a root (`id` immutable; omitted `password` and `pins` are kept) |
+| DELETE | `/api/config/roots/:id` | — | Remove a root (no files deleted) |
+| POST   | `/api/config/roots/:id/pins` | `{ rel }` | Pin a folder, path relative to the root |
+| DELETE | `/api/config/roots/:id/pins` | `{ rel }` | Unpin a folder |
 
 ### Security model
 
@@ -603,7 +662,11 @@ specific root's** boundary:
   the root, so traversal (`..`), absolute paths, and **symlinks pointing outside
   a root are blocked** (a symlinked parent can't be used to escape).
 - **Remote roots:** the decoded remote path is normalized (collapsing `..`) and
-  must stay under the root's `remotePath`, blocking `..` escape over SFTP.
+  must stay under the remote home, blocking `..` escape over SFTP.
+- **Pins** are stored as relative paths and rejected if they are absolute or
+  contain `.` / `..` segments. Pinning never contacts the remote (so it works
+  while a machine is offline), and every actual read is still boundary-checked
+  independently.
 - A token whose `type` doesn't match its root, or whose root id is unknown, is
   rejected (400 / 404) — it can't fall through to another backend.
 - Names for uploaded/created/renamed files are reduced to a basename, stripping

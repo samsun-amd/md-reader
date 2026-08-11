@@ -105,6 +105,42 @@
   border-radius: 4px;
 }
 
+/* Pinned folders. flex-shrink:0 with a content-driven height means the block
+   grows with the pin count, taking space from .sidebar-tree (the only flex:1
+   child). The cap stops one expanded pin from swallowing the whole sidebar. */
+.sidebar-pins {
+  flex-shrink: 0;
+  max-height: 50%;
+  overflow-y: auto;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.sidebar-pins-title {
+  padding: 2px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.sidebar-pin-missing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.sidebar-pin-missing-name {
+  text-decoration: line-through;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-tree {
   flex: 1;
   overflow-y: auto;

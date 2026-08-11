@@ -21,15 +21,14 @@ function validName(name) {
 router.get('/roots', (req, res) => {
   let config;
   try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
-  // Never expose remote credentials (password) to the client; host is needed
-  // only so the sidebar can group roots by machine, and machineName is the
-  // optional friendly label shown on the machine sub-tab.
+  // Never expose remote credentials (password) to the client. `pins` ships here
+  // so the sidebar can render the pinned block without a second request.
   res.json(config.roots.map((r) => ({
     id: r.id,
     name: r.name,
     type: r.type,
     host: r.host || null,
-    machineName: r.machineName || null,
+    pins: r.pins || [],
   })));
 });
 

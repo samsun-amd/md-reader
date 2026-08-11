@@ -2,10 +2,21 @@ import { useEffect, useState, useCallback } from 'react';
 import './ConfigModal.css';
 
 const EMPTY_LOCAL = { type: 'local', id: '', name: '', path: '' };
+// A remote root is just a machine: connection details and a label. It always
+// opens at the remote home; reaching a specific folder is what pins are for.
 const EMPTY_REMOTE = {
-  type: 'remote', id: '', name: '', host: '', machineName: '', port: 22,
-  user: '', password: '', clearPassword: false, os: 'posix', remotePath: '~',
+  type: 'remote', id: '', name: '', host: '', port: 22,
+  user: '', password: '', clearPassword: false, os: 'posix',
 };
+
+// Derive the stored id from the display name, so the user names a machine once
+// instead of inventing an id too. Mirrors slugId() in server/lib/paths.js.
+function slugId(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 // Form-based editor for config.json roots. Never shows raw JSON; passwords are
 // write-only (the server never sends plaintext back).
@@ -67,7 +78,11 @@ export default function ConfigModal({ onClose, onChanged }) {
     setFormError(null);
 
     const d = editing;
-    if (!d.id.trim()) { setFormError('ID is required'); return; }
+    const isEdit = d._mode === 'edit';
+    // On add the id comes from the name; on edit it is immutable.
+    const id = isEdit ? d.id.trim() : slugId(d.name);
+    if (!d.name.trim()) { setFormError('Name is required'); return; }
+    if (!id) { setFormError('Name must contain at least one letter or digit'); return; }
     if (d.type === 'remote') {
       if (!d.host.trim()) { setFormError('Host is required'); return; }
       if (!d.user.trim()) { setFormError('User is required'); return; }
@@ -77,15 +92,15 @@ export default function ConfigModal({ onClose, onChanged }) {
 
     // Build request body. For remote, apply the password sentinel:
     //   clearPassword -> ""   |  non-empty input -> new value  |  else omit.
-    const body = { id: d.id.trim(), name: d.name.trim(), type: d.type };
+    // `pins` is deliberately absent: the server carries the stored list over,
+    // so editing a machine here can never drop its pinned folders.
+    const body = { id, name: d.name.trim(), type: d.type };
     if (d.type === 'remote') {
       Object.assign(body, {
         host: d.host.trim(),
-        machineName: d.machineName.trim(),
         port: Number(d.port) > 0 ? Number(d.port) : 22,
         user: d.user.trim(),
         os: d.os === 'windows' ? 'windows' : 'posix',
-        remotePath: d.remotePath.trim() || '~',
       });
       if (d.clearPassword) body.password = '';
       else if (d.password) body.password = d.password;
@@ -94,9 +109,8 @@ export default function ConfigModal({ onClose, onChanged }) {
       body.path = d.path.trim();
     }
 
-    const isEdit = d._mode === 'edit';
     const url = isEdit
-      ? `/api/config/roots/${encodeURIComponent(d.id.trim())}`
+      ? `/api/config/roots/${encodeURIComponent(id)}`
       : '/api/config/roots';
     setBusy(true);
     try {
@@ -176,7 +190,7 @@ export default function ConfigModal({ onClose, onChanged }) {
               ? <div className="cfg-empty">No remote roots.</div>
               : remoteRoots.map((r) => (
                 <RootRow key={r.id} root={r}
-                  summary={`${r.user}@${r.machineName ? `${r.machineName} (${r.host})` : r.host}:${r.remotePath}`}
+                  summary={`${r.user}@${r.host}${r.port && r.port !== 22 ? `:${r.port}` : ''}`}
                   badge={r.hasPassword ? '●●●●' : 'no password'}
                   onEdit={() => startEdit(r)} onDelete={() => remove(r)} disabled={busy} />
               ))}
@@ -216,19 +230,22 @@ function RootForm({ draft, error, busy, onField, onSubmit, onCancel }) {
         {isEdit ? 'Edit' : 'Add'} {isRemote ? 'remote' : 'local'} root
       </div>
 
-      <label className="cfg-field">
-        <span>ID</span>
-        <input value={draft.id} disabled={isEdit}
-          onChange={(e) => onField('id', e.target.value)}
-          placeholder="unique-id" autoFocus={!isEdit} />
-      </label>
-
+      {/* No ID field: it is derived from the name on add and immutable after,
+          so there is one fewer thing to invent. Shown read-only when editing
+          because it is what config.json keys on. */}
       <label className="cfg-field">
         <span>Name</span>
         <input value={draft.name}
           onChange={(e) => onField('name', e.target.value)}
-          placeholder="Shown in the sidebar" />
+          placeholder="Shown in the sidebar" autoFocus />
       </label>
+
+      {isEdit && (
+        <div className="cfg-field">
+          <span>ID</span>
+          <input value={draft.id} disabled readOnly />
+        </div>
+      )}
 
       {!isRemote && (
         <label className="cfg-field">
@@ -256,13 +273,6 @@ function RootForm({ draft, error, busy, onField, onSubmit, onCancel }) {
           </div>
 
           <label className="cfg-field">
-            <span>Machine name</span>
-            <input value={draft.machineName}
-              onChange={(e) => onField('machineName', e.target.value)}
-              placeholder="Sub-tab label (defaults to host)" />
-          </label>
-
-          <label className="cfg-field">
             <span>User</span>
             <input value={draft.user}
               onChange={(e) => onField('user', e.target.value)} placeholder="root" />
@@ -284,19 +294,17 @@ function RootForm({ draft, error, busy, onField, onSubmit, onCancel }) {
             </label>
           )}
 
-          <div className="cfg-field-row">
-            <label className="cfg-field grow">
-              <span>Remote path</span>
-              <input value={draft.remotePath}
-                onChange={(e) => onField('remotePath', e.target.value)} placeholder="~" />
-            </label>
-            <label className="cfg-field os">
-              <span>OS</span>
-              <select value={draft.os} onChange={(e) => onField('os', e.target.value)}>
-                <option value="posix">posix</option>
-                <option value="windows">windows</option>
-              </select>
-            </label>
+          <label className="cfg-field os">
+            <span>OS</span>
+            <select value={draft.os} onChange={(e) => onField('os', e.target.value)}>
+              <option value="posix">posix</option>
+              <option value="windows">windows</option>
+            </select>
+          </label>
+
+          <div className="cfg-hint">
+            Opens at the remote home directory. Pin a folder from the sidebar’s ⋯
+            menu to jump straight to it.
           </div>
         </>
       )}

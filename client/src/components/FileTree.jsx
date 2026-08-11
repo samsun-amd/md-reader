@@ -70,13 +70,31 @@ function NodeMenu({ items, onClose, anchorRect }) {
 export default function FileTree({
   node, depth, selectedFile, onSelect,
   onUpload, onCreateFile, onRenameFile, onDeleteFile,
+  onTogglePin, pinnedRels, rootNode, defaultExpanded,
 }) {
-  const [expanded, setExpanded] = useState(depth === 0);
+  // A root row opens by default; everything below starts closed. Pinned folders
+  // are rendered at depth 0 for correct indentation but pass false, since the
+  // point of a pin is a short list you expand on demand.
+  const [expanded, setExpanded] = useState(defaultExpanded ?? depth === 0);
   const [dragOver, setDragOver] = useState(false);
   const [menuRect, setMenuRect] = useState(null);
   const isDir = node.type === 'dir' || node.type === 'root';
   const isSelected = node.path === selectedFile;
   const indent = depth * 12;
+
+  // Pins are stored relative to the root, so compare on that. Both tokens end
+  // in a real path after '::', and the root's is a prefix of this node's. The
+  // trailing slash a root path can carry (config `"path": "~/"`) must go, or
+  // the prefix test never matches.
+  const inner = (t) => (typeof t === 'string' && t.includes('::')
+    ? t.slice(t.indexOf('::') + 2).replace(/\/+$/, '')
+    : '');
+  const rel = (() => {
+    const base = inner(rootNode?.path);
+    const here = inner(node.path);
+    return base && here.startsWith(`${base}/`) ? here.slice(base.length + 1) : null;
+  })();
+  const isPinned = Boolean(rel && pinnedRels?.includes(rel));
 
   const handleClick = () => {
     if (isDir) setExpanded((v) => !v);
@@ -119,12 +137,26 @@ export default function FileTree({
     setMenuRect(e.currentTarget.getBoundingClientRect());
   };
 
-  const menuItems = isDir
-    ? [{ label: 'New file…', onClick: () => onCreateFile?.(node.path) }]
-    : [
-        { label: 'Rename…', onClick: () => onRenameFile?.(node.path, node.name) },
-        { label: 'Delete', danger: true, onClick: () => onDeleteFile?.(node.path, node.name) },
-      ];
+  // Pinning applies to real folders only — not the root row (pinning a root
+  // would just duplicate it) and not files.
+  const canPin = onTogglePin && node.type === 'dir';
+  const menuItems = [];
+  if (isDir) {
+    if (onCreateFile) menuItems.push({ label: 'New file…', onClick: () => onCreateFile(node.path) });
+    if (canPin) {
+      menuItems.push({
+        label: isPinned ? 'Unpin folder' : 'Pin folder',
+        onClick: () => onTogglePin(node.path),
+      });
+    }
+  } else {
+    if (onRenameFile) menuItems.push({ label: 'Rename…', onClick: () => onRenameFile(node.path, node.name) });
+    if (onDeleteFile) {
+      menuItems.push({
+        label: 'Delete', danger: true, onClick: () => onDeleteFile(node.path, node.name),
+      });
+    }
+  }
 
   return (
     <div className="tree-node">
@@ -178,6 +210,9 @@ export default function FileTree({
               onCreateFile={onCreateFile}
               onRenameFile={onRenameFile}
               onDeleteFile={onDeleteFile}
+              onTogglePin={onTogglePin}
+              pinnedRels={pinnedRels}
+              rootNode={rootNode}
             />
           ))}
         </div>

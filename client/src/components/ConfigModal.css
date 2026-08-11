@@ -209,6 +209,13 @@
 }
 .cfg-check input { cursor: pointer; }
 
+.cfg-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: -2px;
+}
+
 .cfg-error {
   color: #f85149;
   font-size: 12px;
