@@ -12,21 +12,59 @@ import './MarkdownViewer.css';
 
 const Editor = lazy(() => import('./Editor'));
 
+// Load and configure mermaid once. suppressErrorRendering is the important
+// part: without it a parse failure makes mermaid draw its own "Syntax error in
+// text" SVG into a temp div on document.body and leave it there, so a broken
+// diagram litters the page with a stray graphic no matter what we render here.
+let mermaidPromise = null;
+function loadMermaid() {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid').then(({ default: mermaid }) => {
+      mermaid.initialize({ startOnLoad: false, theme: 'dark', suppressErrorRendering: true });
+      return mermaid;
+    });
+  }
+  return mermaidPromise;
+}
+
+// Mermaid reports failures as "Parse error on line N:" where N is 1-based
+// within the diagram source, which lets us point at the offending line.
+function MermaidError({ message, code }) {
+  const badLine = Number(/(?:error|Error) on line (\d+)/.exec(message)?.[1]) || 0;
+  return (
+    <div className="mermaid-error">
+      <div className="mermaid-error-title">Mermaid diagram failed to render</div>
+      <pre className="mermaid-error-message">{message}</pre>
+      <pre className="mermaid-error-source">
+        {code.split('\n').map((line, i) => (
+          <div key={i} className={i + 1 === badLine ? 'mermaid-error-line bad' : 'mermaid-error-line'}>
+            <span className="mermaid-error-lineno">{i + 1}</span>
+            {line}
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
 function MermaidBlock({ code }) {
   const ref = useRef(null);
+  const [error, setError] = useState(null);
   useEffect(() => {
     let cancelled = false;
-    import('mermaid').then(({ default: mermaid }) => {
-      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+    setError(null);
+    loadMermaid().then(async (mermaid) => {
       const id = `mermaid-${Math.random().toString(36).slice(2)}`;
-      mermaid.render(id, code).then(({ svg }) => {
+      try {
+        const { svg } = await mermaid.render(id, code);
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
-      }).catch((e) => {
-        if (!cancelled && ref.current) ref.current.textContent = `Mermaid error: ${e.message}`;
-      });
+      } catch (e) {
+        if (!cancelled) setError(e?.message || String(e));
+      }
     });
     return () => { cancelled = true; };
   }, [code]);
+  if (error) return <MermaidError message={error} code={code} />;
   return <div className="mermaid-block" ref={ref} />;
 }
 

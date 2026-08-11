@@ -295,3 +295,50 @@
   max-width: 100%;
   height: auto;
 }
+
+.mermaid-error {
+  margin: 1em 0;
+  border: 1px solid #6b2b2b;
+  border-radius: 6px;
+  background: #2a1c1c;
+  overflow: hidden;
+  text-align: left;
+}
+.mermaid-error-title {
+  padding: 6px 10px;
+  background: #3a2222;
+  color: #f0a0a0;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+.mermaid-error-message {
+  margin: 0;
+  padding: 8px 10px;
+  color: #e08a8a;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mermaid-error-source {
+  margin: 0;
+  padding: 8px 0;
+  border-top: 1px solid #6b2b2b;
+  font-size: 0.8em;
+  overflow-x: auto;
+}
+.mermaid-error-line {
+  padding: 0 10px;
+  white-space: pre;
+}
+.mermaid-error-line.bad {
+  background: #522;
+  color: #ffb0b0;
+}
+.mermaid-error-lineno {
+  display: inline-block;
+  width: 2.5em;
+  margin-right: 8px;
+  text-align: right;
+  color: #7a6666;
+  user-select: none;
+}
