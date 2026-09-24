@@ -356,9 +356,16 @@ SSH_MANAGER_CORE=$HOME/path/to/ssh-manager/packages/core npm run link-core
 
 **Why a symlink and not a `package.json` dependency?** npm rewrites any `file:`
 dependency to a normalized form and does **not** expand `~`/`$HOME`, so a
-`~`-relative path becomes a dangling link. Instead, `link-core` builds core if
-needed (`dist/`) and creates `node_modules/@ssh-manager/core` as a symlink
-anchored on a shell-expanded path.
+`~`-relative path becomes a dangling link. Instead, `link-core` installs core's
+build dependencies (including devDependencies), **rebuilds `dist/` on every run**,
+creates `node_modules/@ssh-manager/core` as a symlink anchored on a shell-expanded
+path, and verifies that core can be loaded. An existing `dist/` is not proof that
+it matches the source. Install or build failures stop the script before linking.
+
+This builds the source already in your ssh-manager checkout; it does not run
+`git pull` or restart services. Remote roots continue to use connection details
+from md-reader's own `config.json`, via core's `adhocEndpoint()` API. They do not
+read `ssh_remote_*.json`, so sshm config groups require no md-reader migration.
 
 > **Re-link after every `npm install`.** A plain `npm install` prunes the
 > symlink (it's "extraneous"), so remote roots break until you re-run
@@ -370,9 +377,10 @@ anchored on a shell-expanded path.
 
 **On the remote machine:** install **ripgrep** (`rg`) for fast tree listing — one
 command instead of thousands of SFTP round-trips, the difference between sub-second
-and minutes on a large home. It's optional (md-reader falls back to `find`, then to
-an SFTP walk) but strongly recommended. Install with `apt install ripgrep` /
-`dnf install ripgrep` / `brew install ripgrep`. You only need SSH access to the
+and minutes on a large home. It's optional (POSIX remotes fall back to `find` when
+`rg` is missing; Windows remotes use an SFTP walk) but strongly recommended.
+Install with `apt install ripgrep` / `dnf install ripgrep` / `brew install ripgrep`.
+You only need SSH access to the
 remote — nothing from this repo is installed there.
 
 ---
@@ -480,7 +488,7 @@ then run `wsl --shutdown` from Windows and reopen the shell.
   - Folders → **New file…** (auto-appends `.md` if you don't, opens immediately in the editor) and **Pin folder** / **Unpin folder**.
   - Files → **Rename…** or **Delete** (asks for confirmation).
 - **Drag & drop** files from Windows Explorer / Finder onto any folder row to upload them. Multiple files at once work. Same-named files are auto-renamed to `name (2).md`, `name (3).md`, … — nothing is ever overwritten.
-- Hit **↺** in the sidebar header to **reload `config.json`** on the server (picks up edited roots/ports without a restart) and re-scan the disk.
+- Hit **↺** in the sidebar header to **reload `config.json`** on the server (picks up edited roots without a restart) and re-scan the disk. Port changes require a restart.
 
 ---
 
@@ -488,21 +496,57 @@ then run `wsl --shutdown` from Windows and reopen the shell.
 
 Day-to-day upkeep once it's deployed.
 
+### Local QA
+
+```bash
+npm test                      # baseline regression tests; no core installation needed
+npm run test:core              # remote installs: test against the linked, built core
+npm --prefix client run build # check the frontend build after install:all
+```
+
+Both test suites run locally without an SSH server, reachable target, real
+credentials, or access to your configured roots. They use Node's built-in test
+runner; no additional test framework is required.
+
+- `npm test` covers local file CRUD and uploads, filename conflicts, path/token
+  boundaries, POSIX and Windows remote tree responses, simulated remote errors,
+  pool reset, password/pin preservation, and config persistence/reload. The
+  `link-core.sh` checks run Bash and npm against dependency-free temporary
+  packages with npm offline mode enabled, covering stale builds, custom paths,
+  re-linking, and failure handling. Your real core build and links are untouched.
+- `npm run test:core` requires `npm run link-core` first. It uses the actual core
+  `adhocEndpoint`, `SshPool`, `RemoteFs`, and error class, replacing the session
+  boundary with a local SFTP adapter over temporary files. It checks backend/core
+  compatibility, file operations, tree tokens, and errors, and fails if md-reader
+  tries to load an sshm inventory. It does not test SSH authentication or network
+  reachability; use the app against a configured remote for that.
+
+Tests create and remove temporary fixtures without reading or writing your real
+`config.json`. The frontend build requires installed client dependencies and an
+existing `config.json` (use `config.example.json` for a fresh checkout).
+
 ### Updating to new code
 
 ```bash
-git pull
-npm run install:all           # only if package.json changed
-npm run link-core             # ONLY if you use remote roots — see note below
+git pull --ff-only
+npm run install:all           # if dependency manifests or lockfiles changed
+# Remote installs only: update your ssh-manager checkout when needed, then:
+# git -C ../ssh-manager pull --ff-only
+npm run link-core             # remote only: rebuild core, re-link, verify load
+npm test
+npm run test:core             # remote only: verify the actual core/backend contract
+npm --prefix client run build
 # Then restart whichever way you run it:
 systemctl --user restart md-reader-server md-reader-client   # if using systemd
 # or
 ./stop.sh && ./start.sh                                      # if running loose
 ```
 
-The backend caches code at process start, so **a restart is required** after
-pulling — editing files alone does nothing until the server restarts. (Only the
-Vite client hot-reloads on its own.)
+The backend caches loaded code, so **a restart is required** after updating it or
+rebuilding core. The sidebar's **↺** reloads config and clears SSH connections; it
+does **not** reload JavaScript modules. Only the Vite client hot-reloads its code.
+Run the checks successfully before restarting. Local-only installs skip both
+`link-core` and `test:core`.
 
 ### Re-link `@ssh-manager/core` after any `npm install` (remote only)
 
@@ -514,6 +558,10 @@ roots with `Cannot find module '@ssh-manager/core'`. After any install, re-link:
 npm run link-core
 ```
 
+This also rebuilds core; `npm run install:remote` runs `install:all` followed by
+this same build/link step. Ordinary `start.sh` and the ssh-manager CLI installer
+do not rebuild core.
+
 ### Rebuild core after editing the ssh-manager source (remote only)
 
 md-reader loads core's **compiled** output (`packages/core/dist/`, set by core's
@@ -522,14 +570,19 @@ md-reader loads core's **compiled** output (`packages/core/dist/`, set by core's
 running the old code:
 
 ```bash
-# in the ssh-manager checkout:
-npm --prefix packages/core run build      # regenerate dist/
-# back in md-reader, restart so the server reloads it:
+# From md-reader, after editing/updating the linked ssh-manager checkout:
+npm run link-core
+npm run test:core
+# Restart so the server reloads the compiled code:
 systemctl --user restart md-reader-server   # or ./stop.sh && ./start.sh
 ```
 
-`npm run link-core` also builds `dist/` if it's missing, but it won't rebuild an
-**out-of-date** one — after editing core source, build explicitly.
+If webscp links to the same core directory, this rebuild updates its shared
+files too; already-loaded modules remain cached until that process restarts.
+File-backed consumers of the current core must use `{ "group_number": 0,
+"nodes": [...] }` (or another valid group), rather than a legacy array. Convert
+external legacy inventories before updating those consumers. md-reader's inline
+connection settings and core's in-memory `new Inventory(nodes)` API are unchanged.
 
 ### Confirm which repo the live service is using
 
@@ -553,9 +606,10 @@ journalctl --user -u md-reader-client -f
 
 ### Changing folders / ports
 
-Edit `config.json`, then click **↺** in the sidebar — roots and ports apply without
-a restart (the server re-reads config and drops cached remote SSH connections). No
-redeploy needed for config-only changes.
+Edit roots in `config.json`, then click **↺** in the sidebar. The server re-reads
+the roots and drops cached remote SSH connections without a restart. Changes to
+`port`, `clientPort`, `allowRemoteAccess`, or `readOnly` require a restart because
+the sockets and middleware are initialized at startup.
 
 ---
 
@@ -567,14 +621,14 @@ redeploy needed for config-only changes.
 | Browser shows "Loading…" forever | Check `logs/server.log` — usually the path in `config.json` doesn't exist |
 | `EADDRINUSE` in logs | Change `port` / `clientPort` in `config.json`, or kill the conflicting process (`ss -tlnp \| grep :PORT`) |
 | Sidebar is empty | Configured root has no `.md` / `.mdx` files (other types are hidden by design) |
-| Changes to `config.json` not showing | Click **↺** in the sidebar header to reload config (it's cached server-side). New `roots` / ports apply without a restart. If **↺** still does nothing, the running service is serving a different repo/clone — check its working dir: `ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd`, then re-run `./systemd/install.sh` from the correct repo and restart. |
+| Changes to `config.json` not showing | Click **↺** in the sidebar header to reload roots. Ports and startup settings require a restart. If **↺** still does nothing, the running service may be serving a different repo/clone — check its working dir: `ls -l /proc/$(systemctl --user show -p MainPID --value md-reader-server)/cwd`, then re-run `./systemd/install.sh` from the correct repo and restart. |
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
 | API calls fail only from another site/tab | By default CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`, or set `allowRemoteAccess: true` (and restart) to allow other machines — see [Allowing remote access](#allowing-remote-access). |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
 | Remote root shows an inline error / red row | The remote is offline, or the `host`/`user`/`password` is wrong. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Fix it via the **⚙** root editor (or in `config.json`) and retry. |
 | A pinned folder is struck through | That folder no longer exists on the machine (renamed or deleted). Click **Unpin** on the row, then pin the new location. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
-| Edited ssh-manager core source but nothing changed | md-reader runs core's compiled `dist/`, not its `src/`. Rebuild: `npm --prefix packages/core run build` in the ssh-manager checkout, then restart the server. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
+| Edited ssh-manager core source but nothing changed | Run `npm run link-core` and `npm run test:core` from md-reader, then restart the server. The sidebar reload does not reload core code. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
 | Pulled new code but behavior is unchanged | The backend caches code at startup — restart it (`systemctl --user restart md-reader-server` or `./stop.sh && ./start.sh`). |
 | A whole remote machine's sub-tab errors, others fine | Expected isolation — only that machine failed (offline / wrong credentials). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
 | Client build fails reading `config.json` | `cp config.example.json config.json` first — Vite reads it at build time. |
@@ -588,7 +642,12 @@ md-reader/
 ├── config.example.json         # template (config.json is local & gitignored)
 ├── start.sh / stop.sh          # detect systemd units and delegate, else nohup
 ├── scripts/
-│   └── link-core.sh            # symlink @ssh-manager/core for remote roots
+│   └── link-core.sh            # rebuild, link and load-check @ssh-manager/core
+├── test/
+│   ├── backend.test.js         # local operations and simulated remote behavior
+│   ├── config.test.js          # settings, passwords, pins and isolated persistence
+│   ├── link-core.test.js       # offline build/link regression fixtures
+│   └── core/compat.test.js     # actual core + backend, with a local SFTP adapter
 ├── systemd/
 │   ├── md-reader-server.service.template
 │   ├── md-reader-client.service.template

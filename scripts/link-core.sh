@@ -31,11 +31,10 @@ die() { echo -e "${RED}Error:${NC} $*" >&2; exit 1; }
     $CORE_DIR
   Clone ssh-manager beside md-reader, or set SSH_MANAGER_CORE=/path/to/packages/core"
 
-# Build core if it has no dist yet (md-reader requires the compiled CJS).
-if [[ ! -f "$CORE_DIR/dist/index.js" ]]; then
-  echo "Building @ssh-manager/core (no dist yet)…"
-  ( cd "$CORE_DIR" && npm install --no-audit --no-fund && npm run build )
-fi
+# Always rebuild: an existing dist can be older than the TypeScript source.
+# TypeScript is a devDependency, including on production-only installations.
+echo "Building @ssh-manager/core…"
+( cd "$CORE_DIR" && npm install --include=dev --no-audit --no-fund && npm run build )
 
 mkdir -p "$APP_DIR/node_modules/@ssh-manager"
 ln -sfn "$CORE_DIR" "$APP_DIR/node_modules/@ssh-manager/core"
