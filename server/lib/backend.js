@@ -84,10 +84,10 @@ class Backend {
 // root on every call (never trust the client's token).
 // ---------------------------------------------------------------------------
 class LocalBackend extends Backend {
-  buildTree(dirPath, root) {
+  async buildTree(dirPath, root) {
     let entries;
     try {
-      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
     } catch {
       return [];
     }
@@ -100,7 +100,7 @@ class LocalBackend extends Backend {
           name: entry.name,
           path: encodeToken(root, full),
           type: 'dir',
-          children: this.buildTree(full, root),
+          children: await this.buildTree(full, root),
         });
       } else if (MD_RE.test(entry.name)) {
         result.push({ name: entry.name, path: encodeToken(root, full), type: 'file' });
@@ -117,7 +117,7 @@ class LocalBackend extends Backend {
       name: root.name,
       path: encodeToken(root, root.path),
       type: 'root',
-      children: this.buildTree(root.path, root),
+      children: await this.buildTree(root.path, root),
     };
   }
 

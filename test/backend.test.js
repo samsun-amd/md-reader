@@ -27,6 +27,27 @@ test('local tree keeps frontend tokens, Markdown filtering and directory order',
   assert.equal(tree.children[0].children[0].path, encodeToken(root, path.join(root.path, 'notes/nested.md')));
 });
 
+test('a slow local directory read yields to other work before the tree finishes', async (t) => {
+  const { root, backend } = localFixture(t);
+  fs.mkdirSync(path.join(root.path, 'notes'));
+  fs.writeFileSync(path.join(root.path, 'notes/a.md'), '# QA');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const readdir = fs.promises.readdir;
+  t.mock.method(fs.promises, 'readdir', async (...args) => {
+    await gate;
+    return readdir(...args);
+  });
+  let finished = false;
+  const listing = backend.listTree(root).then((tree) => { finished = true; return tree; });
+  await new Promise(setImmediate);
+  assert.equal(finished, false, 'directory IO must not block the event loop');
+  release();
+  const tree = await listing;
+  assert.equal(tree.children[0].children[0].name, 'a.md');
+});
+
 test('local create, UTF-8 save/read, upload, rename and delete preserve data', async (t) => {
   const { root, backend } = localFixture(t);
   const created = await backend.createFile(root, root.path, 'note');

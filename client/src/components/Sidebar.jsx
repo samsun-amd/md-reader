@@ -79,15 +79,19 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   // Load (or reload) a single root's tree. Each root is independent, so one
   // slow/offline remote never blocks local roots or other remotes.
   const loadRoot = useCallback(async (id) => {
-    setTrees((prev) => ({ ...prev, [id]: { ...prev[id], status: 'loading', error: null } }));
+    // Clearing trees or starting another load invalidates this request.
+    const request = Symbol();
+    setTrees((prev) => ({ ...prev, [id]: { ...prev[id], status: 'loading', error: null, request } }));
+    let state;
     try {
       const r = await fetch(`/api/files/root/${encodeURIComponent(id)}`);
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.statusText);
-      setTrees((prev) => ({ ...prev, [id]: { status: 'ready', tree: data, error: null } }));
+      state = { status: 'ready', tree: data, error: null };
     } catch (e) {
-      setTrees((prev) => ({ ...prev, [id]: { status: 'error', tree: null, error: e.message } }));
+      state = { status: 'error', tree: null, error: e.message };
     }
+    setTrees((prev) => prev[id]?.request === request ? { ...prev, [id]: state } : prev);
   }, []);
 
   // Fetch root metadata once (no remote contact) to build the tab structure.
@@ -105,24 +109,20 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
 
   useEffect(() => { loadRoots(); }, [loadRoots]);
 
-  // Local roots load eagerly (cheap, instant). Remote roots load lazily when
-  // their sub-tab is first activated.
+  // Load only the visible roots. Refreshing a remote must not also scan local
+  // folders, which may live on slow Windows or network filesystems.
   useEffect(() => {
-    for (const r of localRoots) {
+    for (const r of visibleRoots) {
       if (!trees[r.id]) loadRoot(r.id);
     }
-  }, [localRoots, trees, loadRoot]);
+  }, [visibleRoots, trees, loadRoot]);
 
   // Default the active machine sub-tab to the first one once roots arrive.
   useEffect(() => {
-    if (activeMachine == null && remoteRoots.length) setActiveMachine(remoteRoots[0].id);
+    if (!remoteRoots.some((r) => r.id === activeMachine)) {
+      setActiveMachine(remoteRoots[0]?.id ?? null);
+    }
   }, [remoteRoots, activeMachine]);
-
-  // Lazily load the active machine's tree when its sub-tab is first shown.
-  useEffect(() => {
-    if (tab !== 'remote' || !activeMachine) return;
-    if (!trees[activeMachine]) loadRoot(activeMachine);
-  }, [tab, activeMachine, trees, loadRoot]);
 
   // Re-read config.json on the server, then rebuild tabs and refresh only the
   // currently visible root (not every remote).

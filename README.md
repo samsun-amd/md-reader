@@ -300,11 +300,13 @@ The sidebar fetches `GET /api/files/roots` (metadata only, no SSH) to build the
 tabs instantly, then loads each root's tree on its own via
 `GET /api/files/root/:id`:
 
-- **Local roots load eagerly and never wait on a remote.** A slow or offline
-  machine can no longer freeze the whole tree — it only affects its own sub-tab,
-  which shows an inline error with a **Retry** button.
+- **Local roots load while the Local tab is visible.** Directory reads are
+  asynchronous, so slow local folders do not block SSH responses or other roots.
+  A slow or offline remote only affects its own sub-tab, which shows an inline
+  error with a **Retry** button.
 - **Remote sub-tabs load lazily** — a machine is only contacted when you first
-  open its sub-tab. **↺** reloads `config.json` and refreshes only the visible root.
+  open its sub-tab. **↺** reloads `config.json` and refreshes only the visible roots.
+  Responses from older tree requests cannot overwrite a newer refresh.
 
 ### How a remote tree is listed (fast)
 
@@ -510,7 +512,11 @@ runner; no additional test framework is required.
 
 - `npm test` covers local file CRUD and uploads, filename conflicts, path/token
   boundaries, POSIX and Windows remote tree responses, simulated remote errors,
-  pool reset, password/pin preservation, and config persistence/reload. The
+  pool reset, password/pin preservation, and config persistence/reload. It also
+  checks that slow local directory reads yield to other work, stale tree
+  responses cannot replace newer results, and remote refresh loads only visible
+  roots. Sidebar checks execute the request handler and loading effect without
+  a browser; they do not exercise DOM rendering. The
   `link-core.sh` checks run Bash and npm against dependency-free temporary
   packages with npm offline mode enabled, covering stale builds, custom paths,
   re-linking, and failure handling. Your real core build and links are untouched.
@@ -625,13 +631,38 @@ the sockets and middleware are initialized at startup.
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
 | API calls fail only from another site/tab | By default CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`, or set `allowRemoteAccess: true` (and restart) to allow other machines — see [Allowing remote access](#allowing-remote-access). |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
-| Remote root shows an inline error / red row | The remote is offline, or the `host`/`user`/`password` is wrong. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Fix it via the **⚙** root editor (or in `config.json`) and retry. |
+| Remote root shows an inline error / red row | Read the error before changing credentials: connection, command, and filesystem failures can all appear here. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Check `host`/`user`/`password` for connection or authentication failures; see below for timeouts. |
+| Remote reload times out while another SSH session still works | See [Remote refresh timeouts](#remote-refresh-timeouts). MD Reader uses its own SSH pool, and an exec timeout does not prove the SSH transport disconnected. |
 | A pinned folder is struck through | That folder no longer exists on the machine (renamed or deleted). Click **Unpin** on the row, then pin the new location. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
 | Edited ssh-manager core source but nothing changed | Run `npm run link-core` and `npm run test:core` from md-reader, then restart the server. The sidebar reload does not reload core code. See [Maintenance](#rebuild-core-after-editing-the-ssh-manager-source-remote-only). |
 | Pulled new code but behavior is unchanged | The backend caches code at startup — restart it (`systemctl --user restart md-reader-server` or `./stop.sh && ./start.sh`). |
-| A whole remote machine's sub-tab errors, others fine | Expected isolation — only that machine failed (offline / wrong credentials). Fix and hit **Retry** or **↺**; local + other remotes are unaffected. |
+| A whole remote machine's sub-tab errors, others fine | Only that root's request failed. Diagnose its inline error, then hit **Retry** or **↺**; other roots load independently. |
 | Client build fails reading `config.json` | `cp config.example.json config.json` first — Vite reads it at build time. |
+
+### Remote refresh timeouts
+
+**Reload config & refresh** closes MD Reader's cached SSH pool, reloads root
+metadata, and fetches the visible trees. A separate SSH terminal uses a different
+connection, so it can remain healthy while MD Reader's connection or command
+fails. The linked core currently uses 15-second handshake and exec timeouts;
+these are not a deadline for the whole HTTP request.
+
+Local tree walks use `fs.promises.readdir()` so slow Windows, OneDrive, or network
+directory reads do not block the Node.js event loop. Remote refresh does not
+start local scans. Each tree load has a request identity: clearing trees or
+starting a newer load invalidates the old response, including a late timeout.
+Older versions used synchronous local scans and accepted stale responses, which
+could produce a timeout even with a healthy SSH transport or replace a successful
+refresh with an older error. After updating, restart the backend to load the fix.
+
+If a timeout recurs, capture the exact inline error and the failed request's
+status, response body, and duration in the browser's Network panel. Distinguish
+`POST /api/config/reload`, `GET /api/files/roots`, and
+`GET /api/files/root/:id`. For a tree request, measure connection acquisition,
+SFTP home resolution, and the remote `rg`/`find` command separately, and check for
+backend event-loop stalls before increasing a timeout. The API currently returns
+route errors in the response rather than logging each failed request.
 
 ---
 
@@ -647,6 +678,7 @@ md-reader/
 │   ├── backend.test.js         # local operations and simulated remote behavior
 │   ├── config.test.js          # settings, passwords, pins and isolated persistence
 │   ├── link-core.test.js       # offline build/link regression fixtures
+│   ├── sidebar.test.js         # stale responses and visible-root loading
 │   └── core/compat.test.js     # actual core + backend, with a local SFTP adapter
 ├── systemd/
 │   ├── md-reader-server.service.template
