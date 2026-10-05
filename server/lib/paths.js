@@ -209,42 +209,39 @@ function resolveToken(config, token) {
   return { root, innerPath };
 }
 
-// Resolve a path to its canonical form, following symlinks where the target
-// exists. For not-yet-existing paths (e.g. a file about to be created) the
-// deepest existing ancestor is resolved and the remaining segments appended,
-// so a symlinked parent directory cannot be used to escape a root.
+// Only genuinely missing entries may be appended to a resolved ancestor.
+// lstat sees dangling symlinks; realpath must resolve every existing entry.
 function realpathBestEffort(target) {
   let current = path.resolve(target);
   const tail = [];
   // Bound the loop by path depth to avoid any pathological spinning.
   for (let i = 0; i < 4096; i += 1) {
     try {
-      return path.join(fs.realpathSync(current), ...tail.reverse());
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return path.resolve(target); // reached root, nothing resolvable
-      tail.push(path.basename(current));
-      current = parent;
-    }
+      if (fs.lstatSync(current, { throwIfNoEntry: false })) {
+        return path.join(fs.realpathSync(current), ...tail.reverse());
+      }
+    } catch (e) { throw Object.assign(e, { status: 403 }); }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    tail.push(path.basename(current));
+    current = parent;
   }
-  return path.resolve(target);
+  throw Object.assign(new Error('Cannot safely resolve path'), { status: 403 });
 }
 
 // Local-root boundary check. Accepts the resolved local roots only.
 function isUnderRoot(targetPath, roots) {
-  const resolved = realpathBestEffort(targetPath);
-  return roots.some((root) => {
-    if (root.type && root.type !== 'local') return false;
-    const rootResolved = realpathBestEffort(root.path);
-    return resolved === rootResolved || resolved.startsWith(rootResolved + path.sep);
-  });
+  return roots.some((root) => (!root.type || root.type === 'local') && isUnderSpecificRoot(targetPath, root));
 }
 
 // Confirm a resolved local path sits under one specific local root.
 function isUnderSpecificRoot(targetPath, root) {
   const resolved = realpathBestEffort(targetPath);
-  const rootResolved = realpathBestEffort(root.path);
-  return resolved === rootResolved || resolved.startsWith(rootResolved + path.sep);
+  let rootResolved;
+  try { rootResolved = fs.realpathSync(root.path); }
+  catch (e) { throw Object.assign(e, { status: 403 }); }
+  const relative = path.relative(rootResolved, resolved);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 // Map a Node fs error to an HTTP status code so routes can report the real
@@ -253,7 +250,9 @@ function fsErrorStatus(err) {
   switch (err && err.code) {
     case 'ENOENT': return 404;
     case 'EACCES':
-    case 'EPERM': return 403;
+    case 'EPERM':
+    case 'ELOOP': return 403;
+    case 'EEXIST': return 409;
     case 'EISDIR':
     case 'ENOTDIR': return 400;
     default: return 500;
@@ -268,12 +267,17 @@ function withFsStatus(err) {
   return err;
 }
 
+function entryExists(target) {
+  try { return !!fs.lstatSync(target, { throwIfNoEntry: false }); }
+  catch (e) { throw withFsStatus(e); }
+}
+
 function uniqueName(dir, filename) {
   const ext = path.extname(filename);
   const base = path.basename(filename, ext);
   let candidate = filename;
   let n = 2;
-  while (fs.existsSync(path.join(dir, candidate))) {
+  while (entryExists(path.join(dir, candidate))) {
     candidate = `${base} (${n})${ext}`;
     n += 1;
   }
@@ -292,9 +296,11 @@ module.exports = {
   validateRawPins,
   safeRelPath,
   rootById,
+  realpathBestEffort,
   isUnderRoot,
   isUnderSpecificRoot,
   uniqueName,
+  entryExists,
   fsErrorStatus,
   withFsStatus,
   encodeToken,

@@ -3,6 +3,8 @@ const path = require('path');
 const {
   encodeToken,
   uniqueName,
+  entryExists,
+  realpathBestEffort,
   isUnderSpecificRoot,
   withFsStatus,
   safeRelPath,
@@ -80,8 +82,8 @@ class LocalBackend extends Backend {
     };
   }
 
-  resolveInside(root, innerPath) {
-    const resolved = path.resolve(innerPath);
+  resolveInside(root, innerPath, canonical = false) {
+    const resolved = canonical ? realpathBestEffort(innerPath) : path.resolve(innerPath);
     if (!isUnderSpecificRoot(resolved, root)) {
       const err = new Error('Path outside configured root');
       err.status = 403;
@@ -99,45 +101,53 @@ class LocalBackend extends Backend {
   }
 
   async writeFile(root, innerPath, content) {
-    const resolved = this.resolveInside(root, innerPath);
-    if (!MD_RE.test(resolved)) { const e = new Error('Only .md/.mdx files allowed'); e.status = 400; throw e; }
+    const resolved = this.resolveInside(root, innerPath, true);
+    if (!MD_RE.test(innerPath)) { const e = new Error('Only .md/.mdx files allowed'); e.status = 400; throw e; }
     try {
-      fs.writeFileSync(resolved, content, 'utf8');
+      // ponytail: ancestor swaps remain possible; hostile local writers need OS confinement.
+      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+        | (fs.constants.O_NOFOLLOW || 0);
+      const fd = fs.openSync(resolved, flags);
+      try { fs.writeFileSync(fd, content, 'utf8'); }
+      finally { fs.closeSync(fd); }
     } catch (e) { throw withFsStatus(e); }
     return { bytes: Buffer.byteLength(content, 'utf8') };
   }
 
   async createFile(root, folderInner, name) {
-    const dir = this.resolveInside(root, folderInner);
-    let stat;
-    try { stat = fs.statSync(dir); } catch { const e = new Error('Folder not found'); e.status = 404; throw e; }
-    if (!stat.isDirectory()) { const e = new Error('Not a directory'); e.status = 400; throw e; }
-    const finalName = uniqueName(dir, ensureMdName(path.basename(name)));
-    const dest = path.join(dir, finalName);
-    try {
-      fs.writeFileSync(dest, '', { flag: 'wx' });
-    } catch (e) { throw withFsStatus(e); }
-    return { token: encodeToken(root, dest), name: finalName };
+    const out = await this.writeUpload(root, folderInner, ensureMdName(path.basename(name)), Buffer.alloc(0));
+    return { token: out.token, name: out.savedAs };
   }
 
   async writeUpload(root, folderInner, filename, buffer) {
     const dir = this.resolveInside(root, folderInner);
-    const finalName = uniqueName(dir, path.basename(filename));
-    const dest = path.join(dir, finalName);
-    try {
-      fs.writeFileSync(dest, buffer);
-    } catch (e) { throw withFsStatus(e); }
-    return { savedAs: finalName, token: encodeToken(root, dest) };
+    let stat;
+    try { stat = fs.statSync(dir); } catch (e) { throw withFsStatus(e); }
+    if (!stat.isDirectory()) { const e = new Error('Not a directory'); e.status = 400; throw e; }
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const finalName = uniqueName(dir, path.basename(filename));
+      const dest = path.join(dir, finalName);
+      const target = this.resolveInside(root, dest, true);
+      try { fs.writeFileSync(target, buffer, { flag: 'wx' }); }
+      catch (e) {
+        if (e.code === 'EEXIST') continue;
+        throw withFsStatus(e);
+      }
+      return { savedAs: finalName, token: encodeToken(root, dest) };
+    }
+    throw Object.assign(new Error('Could not find a free filename'), { status: 409 });
   }
 
   async rename(root, innerPath, newName) {
     const resolved = this.resolveInside(root, innerPath);
     let stat;
-    try { stat = fs.statSync(resolved); } catch { const e = new Error('File not found'); e.status = 404; throw e; }
+    try { stat = fs.statSync(resolved); } catch (e) { throw withFsStatus(e); }
     if (!stat.isFile()) { const e = new Error('Only files can be renamed'); e.status = 400; throw e; }
     const safeName = ensureMdName(path.basename(newName));
-    const dest = path.join(path.dirname(resolved), safeName);
-    if (fs.existsSync(dest) && path.resolve(dest) !== resolved) {
+    // Contain the entry's parent as well as its target before moving the link.
+    const parent = this.resolveInside(root, path.dirname(resolved));
+    const dest = path.join(parent, safeName);
+    if (entryExists(dest) && path.resolve(dest) !== resolved) {
       const e = new Error('A file with that name already exists'); e.status = 409; throw e;
     }
     try {
@@ -149,9 +159,10 @@ class LocalBackend extends Backend {
   async remove(root, innerPath) {
     const resolved = this.resolveInside(root, innerPath);
     let stat;
-    try { stat = fs.statSync(resolved); } catch { const e = new Error('File not found'); e.status = 404; throw e; }
+    try { stat = fs.statSync(resolved); } catch (e) { throw withFsStatus(e); }
     if (!stat.isFile()) { const e = new Error('Only files can be deleted'); e.status = 400; throw e; }
     if (!MD_RE.test(resolved)) { const e = new Error('Only .md/.mdx files can be deleted'); e.status = 400; throw e; }
+    this.resolveInside(root, path.dirname(resolved));
     try {
       fs.unlinkSync(resolved);
     } catch (e) { throw withFsStatus(e); }

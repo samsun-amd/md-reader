@@ -95,6 +95,241 @@ test('local failures retain 400, 404 and 409 statuses', async (t) => {
   await assert.rejects(backend.remove(root, root.path), { status: 400 });
 });
 
+test('local writes reject dangling links, dangling ancestors and loops without changing targets', async (t) => {
+  const { dir, root, backend } = localFixture(t);
+  const outside = path.join(dir, 'outside.md');
+  const inside = path.join(root.path, 'new.md');
+  for (const [name, target] of [['escape.md', outside], ['inside.md', inside]]) {
+    const link = path.join(root.path, name);
+    fs.symlinkSync(target, link);
+    await assert.rejects(backend.writeFile(root, link, 'bad'), { status: 403 });
+    await assert.rejects(backend.readFile(root, link), { status: 403 });
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+    assert.equal(fs.existsSync(target), false);
+  }
+  fs.symlinkSync(path.join(dir, 'missing-directory'), path.join(root.path, 'dangling'));
+  fs.symlinkSync('loop.md', path.join(root.path, 'loop.md'));
+  for (const name of ['dangling/new.md', 'loop.md']) {
+    await assert.rejects(backend.writeFile(root, path.join(root.path, name), 'bad'), { status: 403 });
+  }
+  assert.equal(fs.existsSync(path.join(dir, 'missing-directory')), false);
+});
+
+test('local upload never follows an occupied dangling link', async (t) => {
+  const { dir, root, backend } = localFixture(t);
+  const outside = path.join(dir, 'outside.md');
+  const link = path.join(root.path, 'draft.md');
+  fs.symlinkSync('../outside.md', link);
+  const out = await backend.writeUpload(root, root.path, 'draft.md', Buffer.from('upload'));
+  assert.equal(fs.existsSync(outside), false);
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(out.savedAs, 'draft (2).md');
+  assert.equal(fs.readFileSync(parseToken(out.token).innerPath, 'utf8'), 'upload');
+});
+
+test('local create and upload skip dangling names and retry exclusive-create collisions', async (t) => {
+  const { dir, root, backend } = localFixture(t);
+  const outside = path.join(dir, 'outside.md');
+  const link = path.join(root.path, 'note.md');
+  fs.symlinkSync(outside, link);
+  assert.equal((await backend.createFile(root, root.path, 'note')).name, 'note (2).md');
+  assert.equal((await backend.writeUpload(root, root.path, 'note.md', Buffer.from('upload'))).savedAs, 'note (3).md');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(fs.existsSync(outside), false);
+
+  const write = fs.writeFileSync;
+  const raced = new Set();
+  t.mock.method(fs, 'writeFileSync', (dest, data, options) => {
+    // Insert a competing link after name selection, just before the real open.
+    if (['create.md', 'upload.md'].includes(path.basename(dest)) && !raced.has(dest)) {
+      raced.add(dest);
+      fs.symlinkSync(outside, dest);
+    }
+    return write(dest, data, options);
+  });
+  assert.equal((await backend.createFile(root, root.path, 'create')).name, 'create (2).md');
+  assert.equal((await backend.writeUpload(root, root.path, 'upload.md', Buffer.from('safe'))).savedAs, 'upload (2).md');
+  assert.equal(raced.size, 2);
+  assert.equal(fs.existsSync(outside), false);
+  for (const name of ['create.md', 'upload.md']) assert.ok(fs.lstatSync(path.join(root.path, name)).isSymbolicLink());
+});
+
+test('local exclusive creation bounds collision retries and propagates other write errors', async (t) => {
+  const { root, backend } = localFixture(t);
+  for (const [code, status] of [['EEXIST', 409], ['EACCES', 403], ['ENOSPC', 500]]) {
+    let attempts = 0;
+    t.mock.method(fs, 'writeFileSync', () => {
+      attempts += 1;
+      assert.ok(attempts <= 1000, 'collision retries must be bounded');
+      throw Object.assign(new Error('Injected write failure'), { code });
+    });
+    await assert.rejects(backend.writeUpload(root, root.path, 'new.md', Buffer.from('data')), { status });
+    if (code !== 'EEXIST') assert.equal(attempts, 1);
+    t.mock.restoreAll();
+  }
+  assert.deepEqual(fs.readdirSync(root.path), []);
+});
+
+test('local canonical writes preserve valid symlinks and entry operations preserve their targets', async (t) => {
+  const { dir, root, backend } = localFixture(t);
+  const target = path.join(root.path, 'target.md');
+  await backend.writeFile(root, target, 'initial');
+  const alias = path.join(dir, 'root-alias');
+  fs.symlinkSync(root.path, alias);
+  const aliasRoot = { ...root, path: alias };
+  const link = path.join(alias, 'link.md');
+  fs.symlinkSync('target.md', link);
+  await backend.writeFile(aliasRoot, link, 'updated');
+  assert.equal(await backend.readFile(aliasRoot, link), 'updated');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  const renamed = await backend.rename(aliasRoot, link, 'renamed');
+  assert.ok(fs.lstatSync(parseToken(renamed.token).innerPath).isSymbolicLink());
+  await backend.remove(aliasRoot, parseToken(renamed.token).innerPath);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'updated');
+  assert.equal((await backend.createFile(aliasRoot, alias, 'new')).name, 'new.md');
+  assert.equal((await backend.writeUpload(aliasRoot, alias, 'new.md', Buffer.from('upload'))).savedAs, 'new (2).md');
+});
+
+test('local rename rejects dangling destinations and rename/remove reject external link entries', async (t) => {
+  const { dir, root, backend } = localFixture(t);
+  const target = path.join(root.path, 'target.md');
+  fs.writeFileSync(target, 'sentinel');
+  const dangling = path.join(root.path, 'occupied.md');
+  fs.symlinkSync(path.join(dir, 'missing.md'), dangling);
+  await assert.rejects(backend.rename(root, target, 'occupied'), { status: 409 });
+  assert.ok(fs.lstatSync(dangling).isSymbolicLink());
+  const outsideLink = path.join(dir, 'outside-link.md');
+  fs.symlinkSync(target, outsideLink);
+  await assert.rejects(backend.rename(root, outsideLink, 'moved'), { status: 403 });
+  await assert.rejects(backend.remove(root, outsideLink), { status: 403 });
+  assert.ok(fs.lstatSync(outsideLink).isSymbolicLink());
+  assert.equal(fs.existsSync(path.join(dir, 'moved.md')), false);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'sentinel');
+});
+
+test('local permission failures stay forbidden for every file operation', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) return t.skip('Requires POSIX permissions and a non-root user');
+  const { root, backend } = localFixture(t);
+  const locked = path.join(root.path, 'locked');
+  fs.mkdirSync(locked);
+  const target = path.join(locked, 'keep.md');
+  fs.writeFileSync(target, 'sentinel');
+  fs.chmodSync(locked, 0);
+  try {
+    assert.throws(() => fs.realpathSync(target), { code: 'EACCES' });
+    for (const op of [
+      () => backend.readFile(root, target),
+      () => backend.writeFile(root, target, 'bad'),
+      () => backend.createFile(root, locked, 'new'),
+      () => backend.writeUpload(root, locked, 'new.md', Buffer.from('bad')),
+      () => backend.rename(root, target, 'new'),
+      () => backend.remove(root, target),
+    ]) await assert.rejects(op(), { status: 403 });
+  } finally { fs.chmodSync(locked, 0o700); }
+  assert.deepEqual(fs.readdirSync(locked), ['keep.md']);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'sentinel');
+});
+
+test('local writes use the validated canonical target and refuse a final-component swap', async (t) => {
+  if (!fs.constants.O_NOFOLLOW) return t.skip('Requires O_NOFOLLOW');
+  const { dir, root, backend } = localFixture(t);
+  const target = path.join(root.path, 'target.md');
+  const link = path.join(root.path, 'alias.md');
+  const outside = path.join(dir, 'outside.md');
+  fs.writeFileSync(target, 'inside');
+  fs.writeFileSync(outside, 'sentinel');
+  fs.symlinkSync(target, link);
+  const open = fs.openSync;
+  let intercepted = false;
+  t.mock.method(fs, 'openSync', (file, flags, ...args) => {
+    intercepted = true;
+    assert.equal(file, target);
+    assert.ok(flags & fs.constants.O_NOFOLLOW);
+    fs.unlinkSync(target);
+    fs.symlinkSync(outside, target);
+    return open(file, flags, ...args);
+  });
+  await assert.rejects(backend.writeFile(root, link, 'bad'), { status: 403 });
+  assert.ok(intercepted);
+  t.mock.restoreAll();
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'sentinel');
+});
+
+test('local write closes its file descriptor when writing fails', async (t) => {
+  const { root, backend } = localFixture(t);
+  const write = fs.writeFileSync;
+  let descriptor;
+  t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+    if (typeof file !== 'number') return write(file, ...args);
+    descriptor = file;
+    throw Object.assign(new Error('Disk full'), { code: 'ENOSPC' });
+  });
+  await assert.rejects(backend.writeFile(root, path.join(root.path, 'new.md'), 'data'), { status: 500 });
+  assert.equal(typeof descriptor, 'number');
+  assert.throws(() => fs.fstatSync(descriptor), { code: 'EBADF' });
+});
+
+test('local HTTP routes preserve boundary errors, collision handling and upload results', async (t) => {
+  const { dir, root } = localFixture(t);
+  const paths = require('../server/lib/paths');
+  t.mock.method(paths, 'loadConfig', () => ({ roots: [root] }));
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+  app.use('/api/content', require('../server/routes/content'));
+  app.use('/api/files', require('../server/routes/files'));
+  app.use('/api/upload', require('../server/routes/upload'));
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const outside = path.join(dir, 'outside.md');
+  const link = path.join(root.path, 'draft.md');
+  fs.symlinkSync(outside, link);
+  const put = await fetch(`${base}/api/content`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: encodeToken(root, link), content: 'bad' }),
+  });
+  assert.equal(put.status, 403);
+  const missing = await fetch(`${base}/api/content?path=${encodeURIComponent(encodeToken(root, path.join(root.path, 'missing.md')))}`);
+  assert.equal(missing.status, 404);
+  const create = await fetch(`${base}/api/files/new`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder: encodeToken(root, root.path), name: 'draft' }),
+  });
+  assert.equal(create.status, 200);
+  const created = await create.json();
+  assert.equal(created.name, 'draft (2).md');
+  const rename = await fetch(`${base}/api/files/rename`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: created.path, newName: 'draft' }),
+  });
+  assert.equal(rename.status, 409);
+  const outsideLink = path.join(dir, 'inward.md');
+  fs.symlinkSync(parseToken(created.path).innerPath, outsideLink);
+  const remove = await fetch(`${base}/api/files?path=${encodeURIComponent(encodeToken(root, outsideLink))}`, { method: 'DELETE' });
+  assert.equal(remove.status, 403);
+  assert.ok(fs.lstatSync(outsideLink).isSymbolicLink());
+  for (const folder of [root.path, dir]) {
+    const form = new FormData();
+    form.append('folder', encodeToken(root, folder));
+    form.append('files', new Blob(['upload']), 'draft.md');
+    const response = await fetch(`${base}/api/upload`, { method: 'POST', body: form });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    if (folder === root.path) {
+      assert.equal(result.written[0].savedAs, 'draft (3).md');
+      assert.deepEqual(result.skipped, []);
+    } else {
+      assert.deepEqual(result.written, []);
+      assert.match(result.skipped[0].reason, /outside configured root/);
+    }
+  }
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(fs.existsSync(outside), false);
+});
+
 test('tokens retain special characters and reject wrong roots or types', () => {
   const root = { id: 'qa', type: 'remote' };
   const inner = '~/notes/a # % ::.md';

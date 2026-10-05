@@ -521,6 +521,11 @@ runner; no additional test framework is required.
   `link-core.sh` checks run Bash and npm against dependency-free temporary
   packages with npm offline mode enabled, covering stale builds, custom paths,
   re-linking, and failure handling. Your real core build and links are untouched.
+  Local boundary regressions also cover dangling symlinks, exclusive-create
+  collisions and retries, valid in-root links and symlinked roots, rename/delete
+  entry containment, file descriptor cleanup, and real HTTP route responses.
+  POSIX permission checks require a non-root user; the final-component swap
+  check requires `O_NOFOLLOW`. Those checks report a skip when unsupported.
 - `npm run test:core` requires `npm run link-core` first. It uses the actual core
   `adhocEndpoint`, `SshPool`, `RemoteFs`, and error class, replacing the session
   boundary with a local SFTP adapter over temporary files. It checks backend/core
@@ -760,9 +765,17 @@ The backend never trusts a client token. For every operation it decodes the
 token, looks up the owning root, and re-validates the decoded path against **that
 specific root's** boundary:
 
-- **Local roots:** paths are canonicalized with `realpath` and confirmed under
-  the root, so traversal (`..`), absolute paths, and **symlinks pointing outside
-  a root are blocked** (a symlinked parent can't be used to escape).
+- **Local roots:** existing paths must resolve under the canonical root. Only
+  genuinely missing entries can be appended to a verified ancestor; dangling
+  symlinks (including in-root targets), loops, and resolution failures return 403.
+  Ordinary new files and valid in-root symlinks remain usable, including when
+  the configured root itself is a symlink. Saves open the validated canonical
+  target with `O_NOFOLLOW` where available and close the descriptor even on error.
+  Create/upload treat dangling links as occupied names, use exclusive creation,
+  and retry competing creations up to 100 times before returning a conflict.
+  Rename/delete validate the entry's parent as well as its target and operate
+  on the link entry. Rename returns 409 for an occupied destination, including
+  a dangling link.
 - **Remote roots:** the decoded remote path is normalized (collapsing `..`) and
   must stay under the remote home, blocking `..` escape over SFTP.
 - **Pins** are stored as relative paths and rejected if they are absolute or
@@ -779,3 +792,15 @@ specific root's** boundary:
 There is no auth — by default this runs locally on your own machine. Remote SSH
 credentials are stored in `config.json` (gitignored) and used only server-side to
 open the SFTP session; they are never sent to the browser.
+
+Local path checks are not an OS filesystem sandbox. Another local process can
+still replace ancestor directories between validation and an operation; rename
+collision checks are not atomic against concurrent destination replacement.
+Platforms without `O_NOFOLLOW` retain preflight validation but lack the extra
+final-component save protection. Hostile concurrent local writers require
+descriptor-relative traversal or OS confinement; these races are outside the
+current guarantee.
+
+Upload keeps its batch result contract: individual failures appear in `skipped`
+with a reason, while successful files appear in `written`. A processed batch can
+return HTTP 200 even when every file was skipped.
