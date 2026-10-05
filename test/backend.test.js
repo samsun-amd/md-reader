@@ -160,33 +160,74 @@ test('remote uploads stop on permission errors instead of choosing another filen
   await assert.rejects(remoteFixture(rfs).writeUpload(remoteRoot, '~', 'a.md', Buffer.from('QA')), { status: 403 });
 });
 
-test('POSIX remote listing builds frontend tokens and excludes hidden/outside paths', async () => {
-  const backend = remoteFixture({});
-  const base = "/srv/qa's notes";
-  let command;
-  const children = await backend.listViaExec({ exec: async (cmd) => {
-    command = cmd;
-    return { stdout: `${base}/sub/b.mdx\n${base}/a.md\n${base}/.hidden/c.md\n/other/no.md\n${base}/no.txt\n` };
-  } }, remoteRoot, base);
-  assert.match(command, /^bash -lc /);
-  assert.ok(command.includes('rg --files'));
-  assert.deepEqual(children.map((n) => n.name), ['sub', 'a.md']);
-  assert.equal(children[0].children[0].path, encodeToken(remoteRoot, `${base}/sub/b.mdx`));
+test('remote directories load one level on POSIX and Windows, including independent pins', async () => {
+  for (const [os, base] of [['posix', "/srv/qa's notes"], ['windows', 'C:/Users/qa']]) {
+    const listed = [];
+    const rfs = {
+      session: { os, sftp: async () => ({ realpath: (p, cb) => cb(null, p) }) },
+      expandHome: async () => base,
+      path: { join: path.posix.join, basename: path.posix.basename, isUnder: (a, b) => b.startsWith(`${a}/`) },
+      list: async (dir) => {
+        listed.push(dir);
+        return dir === base ? [
+          { type: 'file', name: 'A.MD', path: `${dir}/A.MD` },
+          { type: 'dir', name: 'notes', path: `${dir}/notes` },
+          { type: 'dir', name: '.hidden', path: `${dir}/.hidden` },
+          { type: 'symlink', name: 'escape', path: `${dir}/escape` },
+          { type: 'file', name: 'skip.txt', path: `${dir}/skip.txt` },
+        ] : [{ type: 'file', name: 'b.mdx', path: `${dir}/b.mdx` }];
+      },
+    };
+    const backend = remoteFixture(rfs);
+    const tree = await backend.listTree(remoteRoot);
+    assert.deepEqual(listed, [base], 'must never descend into children');
+    assert.equal(tree.path, encodeToken(remoteRoot, base));
+    assert.deepEqual(tree.children.map((n) => n.name), ['notes', 'A.MD']);
+    assert.equal(tree.children[0].children, null, 'unloaded is distinct from empty');
+    assert.equal(tree.children[0].rel, 'notes');
+    const pin = await remoteFixture(rfs).listTree(remoteRoot, 'deep/pin');
+    assert.deepEqual(listed, [base, `${base}/deep/pin`], 'pins must not read ancestors');
+    assert.equal(pin.rel, 'deep/pin');
+    assert.equal(pin.children[0].path, encodeToken(remoteRoot, `${base}/deep/pin/b.mdx`));
+    rfs.list = async () => [];
+    assert.deepEqual((await backend.listTree(remoteRoot, 'empty')).children, []);
+  }
 });
 
-test('Windows remote listing uses SFTP and preserves root response shape', async () => {
+test('remote listing rejects invalid paths, symlink escapes and maps directory errors', async () => {
+  const base = '/home/qa';
   const rfs = {
-    session: { os: 'windows' },
-    expandHome: async () => 'C:/Users/qa',
-    list: async (dir) => dir.endsWith('/notes')
-      ? [{ type: 'file', name: 'a.md', path: `${dir}/a.md` }]
-      : [{ type: 'dir', name: 'notes', path: `${dir}/notes` }, { type: 'file', name: 'skip.txt', path: `${dir}/skip.txt` }],
+    session: { sftp: async () => ({ realpath: (_p, cb) => cb(null, '/outside') }) },
+    expandHome: async () => base,
+    path: { join: path.posix.join, isUnder: (a, b) => b.startsWith(`${a}/`) },
+    list: async () => assert.fail('Invalid paths must not be listed'),
   };
-  const tree = await remoteFixture(rfs).listTree(remoteRoot);
-  assert.equal(tree.type, 'root');
-  assert.equal(tree.path, 'remote:qa::C:/Users/qa');
-  assert.deepEqual(tree.children.map((n) => n.name), ['notes']);
-  assert.equal(tree.children[0].children[0].path, 'remote:qa::C:/Users/qa/notes/a.md');
+  const backend = remoteFixture(rfs);
+  for (const rel of ['../escape', '/outside', 'C:/outside', 'notes/../escape', ['notes'], 'bad\0path']) {
+    await assert.rejects(backend.listTree(remoteRoot, rel), { status: 400 });
+  }
+  for (const rel of ['.hidden', 'notes/.hidden', 'escape']) {
+    await assert.rejects(backend.listTree(remoteRoot, rel), { status: 403 });
+  }
+  for (const [code, status] of [[2, 404], [3, 403]]) {
+    rfs.list = async () => { throw Object.assign(new Error('SFTP failure'), { code }); };
+    await assert.rejects(backend.listTree(remoteRoot), { status });
+  }
+});
+
+test('stalled directory requests return 504 and close their session', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let ended = 0;
+  const backend = remoteFixture({
+    session: { end: () => { ended += 1; } },
+    expandHome: async () => new Promise(() => {}),
+  });
+  const result = backend.listTree(remoteRoot);
+  const rejected = assert.rejects(result, { status: 504, message: 'Directory listing timed out after 15 seconds' });
+  await new Promise(setImmediate);
+  t.mock.timers.tick(15000);
+  await rejected;
+  assert.equal(ended, 1);
 });
 
 test('config reload closes the shared remote pool and local routing stays independent', () => {

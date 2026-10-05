@@ -32,19 +32,27 @@ router.get('/roots', (req, res) => {
   })));
 });
 
-// GET /api/files/root/:id — build the tree for ONE root. Each root loads
-// independently so a slow/offline remote never blocks local roots or other
-// remotes. Connectivity failures surface as the backend's status (e.g. 503).
+// GET /api/files/root/:id?rel=notes — local tree or one remote directory.
 router.get('/root/:id', async (req, res) => {
+  const started = Date.now();
   let config;
   try { config = loadConfig(); } catch (e) { return res.status(500).json({ error: e.message }); }
   const root = rootById(config, req.params.id);
   if (!root) return res.status(404).json({ error: `Unknown root id "${req.params.id}"` });
   try {
-    const tree = await backendFor(root).listTree(root);
+    if (req.query.rel !== undefined && (typeof req.query.rel !== 'string' || root.type !== 'remote')) {
+      return res.status(400).json({ error: 'rel must be a string for a remote root' });
+    }
+    const tree = await backendFor(root).listTree(root, req.query.rel);
     res.json(tree);
   } catch (e) {
     res.status(statusOf(e)).json({ error: e.message });
+  } finally {
+    if (root.type === 'remote') {
+      console.log('[remote-list]', JSON.stringify({
+        root: root.id, rel: req.query.rel || '', status: res.statusCode, ms: Date.now() - started,
+      }));
+    }
   }
 });
 

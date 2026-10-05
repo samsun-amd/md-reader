@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import './FileTree.css';
 
+export function treeKey(id, rel = '') {
+  return JSON.stringify([id, rel]);
+}
+
 const ChevronRight = () => (
   <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
     <path d="M4.5 2.5l4 3.5-4 3.5V2.5z" />
@@ -71,6 +75,7 @@ export default function FileTree({
   node, depth, selectedFile, onSelect,
   onUpload, onCreateFile, onRenameFile, onDeleteFile,
   onTogglePin, pinnedRels, rootNode, defaultExpanded,
+  rootId, directoryStates, onLoadDirectory,
 }) {
   // A root row opens by default; everything below starts closed. Pinned folders
   // are rendered at depth 0 for correct indentation but pass false, since the
@@ -81,6 +86,15 @@ export default function FileTree({
   const isDir = node.type === 'dir' || node.type === 'root';
   const isSelected = node.path === selectedFile;
   const indent = depth * 12;
+  const lazy = isDir && node.children === null;
+  const state = directoryStates?.[treeKey(rootId, node.rel)];
+  const children = lazy ? state?.tree?.children : node.children;
+  const folderPath = lazy ? state?.tree?.path || node.path : node.path;
+  const missing = lazy && state?.statusCode === 404;
+
+  useEffect(() => {
+    if (expanded && lazy && !state) onLoadDirectory(rootId, node.rel);
+  }, [expanded, lazy, state, onLoadDirectory, rootId, node.rel]);
 
   // Pins are stored relative to the root, so compare on that. Both tokens end
   // in a real path after '::', and the root's is a prefix of this node's. The
@@ -89,7 +103,7 @@ export default function FileTree({
   const inner = (t) => (typeof t === 'string' && t.includes('::')
     ? t.slice(t.indexOf('::') + 2).replace(/\/+$/, '')
     : '');
-  const rel = (() => {
+  const rel = node.rel ?? (() => {
     const base = inner(rootNode?.path);
     const here = inner(node.path);
     return base && here.startsWith(`${base}/`) ? here.slice(base.length + 1) : null;
@@ -127,7 +141,7 @@ export default function FileTree({
     setDragOver(false);
     const files = e.dataTransfer?.files;
     if (files && files.length > 0) {
-      onUpload?.(node.path, files);
+      onUpload?.(folderPath, files);
       if (!expanded) setExpanded(true);
     }
   };
@@ -142,11 +156,11 @@ export default function FileTree({
   const canPin = onTogglePin && node.type === 'dir';
   const menuItems = [];
   if (isDir) {
-    if (onCreateFile) menuItems.push({ label: 'New file…', onClick: () => onCreateFile(node.path) });
+    if (onCreateFile && !missing) menuItems.push({ label: 'New file…', onClick: () => onCreateFile(folderPath) });
     if (canPin) {
       menuItems.push({
         label: isPinned ? 'Unpin folder' : 'Pin folder',
-        onClick: () => onTogglePin(node.path),
+        onClick: () => onTogglePin(folderPath, node.rel),
       });
     }
   } else {
@@ -164,11 +178,20 @@ export default function FileTree({
         className={`tree-row${isSelected ? ' selected' : ''}${isDir ? ' dir' : ' file'}${dragOver ? ' drag-over' : ''}`}
         style={{ paddingLeft: `${8 + indent}px` }}
         onClick={handleClick}
+        role="button"
+        tabIndex={0}
+        aria-expanded={isDir ? expanded : undefined}
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        title={node.path}
+        title={folderPath}
       >
         {isDir && (
           <span className={`chevron${expanded ? ' open' : ''}`}>
@@ -178,7 +201,7 @@ export default function FileTree({
         <span className="tree-icon">
           {isDir ? <FolderIcon open={expanded} /> : <FileIcon />}
         </span>
-        <span className="tree-name">{node.name}</span>
+        <span className={`tree-name${missing ? ' sidebar-pin-missing-name' : ''}`}>{node.name}</span>
         <button
           className="tree-menu-btn"
           onClick={openMenu}
@@ -197,9 +220,21 @@ export default function FileTree({
         />
       )}
 
-      {isDir && expanded && node.children && (
+      {expanded && lazy && state?.status !== 'ready' && (
+        <div className={`sidebar-status${state?.status === 'error' ? ' error' : ''}`} role="status">
+          {state?.status === 'error' ? state.error : 'Loading…'}
+          {state?.status === 'error' && (
+            <button className="retry-btn" onClick={() => onLoadDirectory(rootId, node.rel)}>Retry</button>
+          )}
+          {missing && isPinned && onTogglePin && (
+            <button className="retry-btn" onClick={() => onTogglePin(folderPath, node.rel)}>Unpin</button>
+          )}
+        </div>
+      )}
+
+      {isDir && expanded && children && (
         <div className="tree-children">
-          {node.children.map((child) => (
+          {children.map((child) => (
             <FileTree
               key={child.path}
               node={child}
@@ -213,6 +248,9 @@ export default function FileTree({
               onTogglePin={onTogglePin}
               pinnedRels={pinnedRels}
               rootNode={rootNode}
+              rootId={rootId}
+              directoryStates={directoryStates}
+              onLoadDirectory={onLoadDirectory}
             />
           ))}
         </div>

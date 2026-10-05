@@ -28,7 +28,10 @@ test('real core supports md-reader endpoints, tree and file operations without i
 
   // The real RemoteFs runs against local temporary files through the SFTP API.
   const sftp = {
-    realpath: (_p, cb) => cb(null, dir),
+    realpath: (p, cb) => fs.realpath(p === '.' ? dir : p, cb),
+    readdir: (p, cb) => fs.readdir(p, (err, names) => cb(err, names?.map((filename) => ({
+      filename, attrs: fs.lstatSync(path.join(p, filename)),
+    })))),
     stat: fs.stat,
     createReadStream: fs.createReadStream,
     createWriteStream: fs.createWriteStream,
@@ -37,7 +40,7 @@ test('real core supports md-reader endpoints, tree and file operations without i
   };
   const session = {
     os: 'posix', sftp: async () => sftp,
-    exec: async () => ({ stdout: `${dir}/note.md\n`, stderr: '', code: 0 }),
+    exec: async () => assert.fail('SFTP listing must not execute a recursive command'),
   };
   let sessions = 0;
   backend.shared.pool.withSession = async (selected, fn) => {

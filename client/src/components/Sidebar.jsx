@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, Fragment } from 'react';
-import FileTree from './FileTree';
+import FileTree, { treeKey } from './FileTree';
 import ConfigModal from './ConfigModal';
 import './Sidebar.css';
 
@@ -50,7 +50,7 @@ function findNodeByRel(rootNode, rel) {
 export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   const [roots, setRoots] = useState([]);
   const [rootsError, setRootsError] = useState(null);
-  // Per-root tree state: { [id]: { status: 'idle'|'loading'|'ready'|'error', tree, error } }
+  // Root and remote directory results share a cache keyed by [root id, relative path].
   const [trees, setTrees] = useState({});
   const [tab, setTab] = useState('local'); // 'local' | 'remote'
   const [activeMachine, setActiveMachine] = useState(null); // host key of active sub-tab
@@ -76,22 +76,23 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
     setTimeout(() => setToast(null), 3500);
   }, []);
 
-  // Load (or reload) a single root's tree. Each root is independent, so one
-  // slow/offline remote never blocks local roots or other remotes.
-  const loadRoot = useCallback(async (id) => {
+  // Remote directories and pins load independently and reuse the same results.
+  const loadRoot = useCallback(async (id, rel = '') => {
+    const key = treeKey(id, rel);
     // Clearing trees or starting another load invalidates this request.
     const request = Symbol();
-    setTrees((prev) => ({ ...prev, [id]: { ...prev[id], status: 'loading', error: null, request } }));
+    setTrees((prev) => ({ ...prev, [key]: { status: 'loading', error: null, request } }));
     let state;
     try {
-      const r = await fetch(`/api/files/root/${encodeURIComponent(id)}`);
+      const query = rel ? `?rel=${encodeURIComponent(rel)}` : '';
+      const r = await fetch(`/api/files/root/${encodeURIComponent(id)}${query}`);
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || r.statusText);
+      if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
       state = { status: 'ready', tree: data, error: null };
     } catch (e) {
-      state = { status: 'error', tree: null, error: e.message };
+      state = { status: 'error', tree: null, error: e.message, statusCode: e.status };
     }
-    setTrees((prev) => prev[id]?.request === request ? { ...prev, [id]: state } : prev);
+    setTrees((prev) => prev[key]?.request === request ? { ...prev, [key]: state } : prev);
   }, []);
 
   // Fetch root metadata once (no remote contact) to build the tab structure.
@@ -113,7 +114,7 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   // folders, which may live on slow Windows or network filesystems.
   useEffect(() => {
     for (const r of visibleRoots) {
-      if (!trees[r.id]) loadRoot(r.id);
+      if (!trees[treeKey(r.id)]) loadRoot(r.id);
     }
   }, [visibleRoots, trees, loadRoot]);
 
@@ -148,7 +149,11 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   }, [loadRoots, showToast]);
 
   // Refresh whichever root a just-changed file belongs to.
-  const refreshRoot = useCallback((id) => { if (id) loadRoot(id); }, [loadRoot]);
+  const refreshRoot = useCallback((id) => {
+    if (!id) return;
+    setTrees((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => JSON.parse(key)[0] !== id)));
+    loadRoot(id);
+  }, [loadRoot]);
 
   const uploadFiles = useCallback(async (folderPath, fileList) => {
     const files = Array.from(fileList).filter((f) => /\.(md|mdx)$/i.test(f.name));
@@ -250,16 +255,16 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
   }, [loadRoots, showToast]);
 
   // Toggle from a tree row, which knows a token but not its relative path.
-  const togglePin = useCallback((folderToken) => {
+  const togglePin = useCallback((folderToken, folderRel) => {
     const id = rootIdOfToken(folderToken);
-    const rel = relPathOf(trees[id]?.tree, folderToken);
+    const rel = folderRel ?? relPathOf(trees[treeKey(id)]?.tree, folderToken);
     if (!id || !rel) { showToast('Cannot pin this folder', 'error'); return; }
     const pinned = (roots.find((r) => r.id === id)?.pins || []).includes(rel);
     setPin(id, rel, pinned);
   }, [trees, roots, setPin, showToast]);
 
   const renderRoot = useCallback((rootMeta) => {
-    const state = trees[rootMeta.id];
+    const state = trees[treeKey(rootMeta.id)];
     if (!state || state.status === 'loading' || state.status === 'idle') {
       return <div className="sidebar-status">Loading…</div>;
     }
@@ -284,25 +289,28 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
         onTogglePin={togglePin}
         pinnedRels={rootMeta.pins}
         rootNode={state.tree}
+        rootId={rootMeta.id}
+        directoryStates={rootMeta.type === 'remote' ? trees : undefined}
+        onLoadDirectory={loadRoot}
       />
     );
   }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile, loadRoot,
     readOnly, togglePin]);
 
-  // The pinned block for one root. Renders straight out of the loaded tree, so
-  // it inherits that root's loading/error state instead of having its own.
-  // depth={1} makes each pin collapsed by default (FileTree opens only depth 0).
+  // Remote pins are independent lazy directories, available even if home fails.
   const renderPins = useCallback((rootMeta) => {
     const pins = rootMeta.pins || [];
     if (!pins.length) return null;
-    const state = trees[rootMeta.id];
+    const state = trees[treeKey(rootMeta.id)];
     return (
       <div className="sidebar-pins">
         <div className="sidebar-pins-title">Pinned</div>
-        {state?.status !== 'ready'
+        {rootMeta.type !== 'remote' && state?.status !== 'ready'
           ? <div className="sidebar-status">Loading…</div>
           : pins.map((rel) => {
-            const node = findNodeByRel(state.tree, rel);
+            const node = rootMeta.type === 'remote'
+              ? { name: rel, path: `remote:${rootMeta.id}::~/${rel}`, type: 'dir', rel, children: null }
+              : findNodeByRel(state.tree, rel);
             // Folder gone (renamed/deleted on the machine). Say so and offer
             // the only useful action rather than silently dropping the row.
             if (!node) {
@@ -329,14 +337,17 @@ export default function Sidebar({ selectedFile, onSelect, readOnly = false }) {
                 onDeleteFile={readOnly ? undefined : deleteFile}
                 onTogglePin={togglePin}
                 pinnedRels={pins}
-                rootNode={state.tree}
+                rootNode={state?.tree}
+                rootId={rootMeta.id}
+                directoryStates={rootMeta.type === 'remote' ? trees : undefined}
+                onLoadDirectory={loadRoot}
               />
             );
           })}
       </div>
     );
   }, [trees, selectedFile, onSelect, uploadFiles, createFile, renameFile, deleteFile,
-    readOnly, togglePin, setPin]);
+    readOnly, togglePin, setPin, loadRoot]);
 
   return (
     <div className="sidebar">

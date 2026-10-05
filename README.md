@@ -287,9 +287,9 @@ so a folder ten levels down is one click away instead of ten.
 - They are stored in `config.json` as paths relative to the root (`"pins":
   ["notes", "projects/wiki"]`), so they survive a browser change and can be
   hand-edited.
-- A pin is a second way into the tree you already loaded — expanding one costs no
-  extra request. If the folder disappears on the machine, the row is struck
-  through with an **Unpin** button rather than vanishing silently.
+- Remote pins load their own directory on expansion, even if the home listing
+  fails. They share cached children with the main tree. Missing folders show an
+  error and **Unpin** after expansion. Local pins reuse the loaded local tree.
 
 Pinning is exempt from [read-only mode](#read-only-mode): it is navigation, not a
 document edit.
@@ -308,22 +308,27 @@ tabs instantly, then loads each root's tree on its own via
   open its sub-tab. **↺** reloads `config.json` and refreshes only the visible roots.
   Responses from older tree requests cannot overwrite a newer refresh.
 
-### How a remote tree is listed (fast)
+### How a remote tree is listed
 
-Listing a remote root runs **one** command over SSH instead of walking the tree
-directory-by-directory over SFTP (which is one network round-trip per directory —
-minutes on a home with tens of thousands of folders):
+Opening a remote loads **only the home directory's immediate children** over
+SFTP. Expanding a folder requests that one directory through
+`GET /api/files/root/:id?rel=notes/subfolder`. POSIX and Windows use the same flow;
+there is no recursive home scan and no ripgrep requirement. Core can fall back
+to a one-level command listing on POSIX endpoints without SFTP.
 
-- Primary: `rg --files -g '*.md' -g '*.mdx'` — ripgrep returns every match in one
-  shot (sub-second even on large trees) and, by default, skips hidden files and
-  honors `.gitignore`. Hidden files are intentionally never shown.
-- Fallback: if `rg` isn't on the remote (`exit 127`), it falls back to `find`.
-- The flat path list is reassembled into the nested folder tree server-side.
-- **Windows remotes** have no POSIX shell for this, so they keep using the
-  per-directory SFTP walk. (All-Linux setups always get the fast path.)
+- Directories carry `children: null` until loaded; `[]` means loaded and empty.
+- Loaded children are shared between pins and the main tree until refresh.
+- All non-hidden directories are shown, including empty or gitignored folders.
+  Only `.md` / `.mdx` files are shown; hidden entries and symlink entries are skipped.
+- A failed folder has its own **Retry**, leaving other folders usable.
+- File creation, uploads, renames and deletion invalidate that root's directory
+  cache. Only the home and currently expanded pins load again; other folders
+  load when reopened.
+- Relative paths are validated, and resolved directory paths must stay inside
+  the remote home. Listing has a 15-second deadline after connection acquisition;
+  a timeout returns **504** and closes that session. Connection failures use **503**.
 
-Reads, writes, renames, deletes and uploads still go over SFTP — only **listing**
-uses the command path.
+Reads, writes, renames, deletes and uploads still use the existing backend.
 
 ### The token model (how a path knows which machine it lives on)
 
@@ -377,13 +382,8 @@ read `ssh_remote_*.json`, so sshm config groups require no md-reader migration.
 > sidebar** (and the API returns **HTTP 503**) instead of hanging the whole
 > tree — other roots still load.
 
-**On the remote machine:** install **ripgrep** (`rg`) for fast tree listing — one
-command instead of thousands of SFTP round-trips, the difference between sub-second
-and minutes on a large home. It's optional (POSIX remotes fall back to `find` when
-`rg` is missing; Windows remotes use an SFTP walk) but strongly recommended.
-Install with `apt install ripgrep` / `dnf install ripgrep` / `brew install ripgrep`.
-You only need SSH access to the
-remote — nothing from this repo is installed there.
+**On the remote machine:** SSH access is sufficient; SFTP is preferred. No
+ripgrep installation or recursive indexing service is needed.
 
 ---
 
@@ -490,7 +490,7 @@ then run `wsl --shutdown` from Windows and reopen the shell.
   - Folders → **New file…** (auto-appends `.md` if you don't, opens immediately in the editor) and **Pin folder** / **Unpin folder**.
   - Files → **Rename…** or **Delete** (asks for confirmation).
 - **Drag & drop** files from Windows Explorer / Finder onto any folder row to upload them. Multiple files at once work. Same-named files are auto-renamed to `name (2).md`, `name (3).md`, … — nothing is ever overwritten.
-- Hit **↺** in the sidebar header to **reload `config.json`** on the server (picks up edited roots without a restart) and re-scan the disk. Port changes require a restart.
+- Hit **↺** in the sidebar header to **reload `config.json`** on the server and clear cached listings. Visible local roots are re-scanned; remote roots reload only home and expanded pins. Port changes require a restart.
 
 ---
 
@@ -511,12 +511,13 @@ credentials, or access to your configured roots. They use Node's built-in test
 runner; no additional test framework is required.
 
 - `npm test` covers local file CRUD and uploads, filename conflicts, path/token
-  boundaries, POSIX and Windows remote tree responses, simulated remote errors,
-  pool reset, password/pin preservation, and config persistence/reload. It also
-  checks that slow local directory reads yield to other work, stale tree
-  responses cannot replace newer results, and remote refresh loads only visible
-  roots. Sidebar checks execute the request handler and loading effect without
-  a browser; they do not exercise DOM rendering. The
+  boundaries, one-level POSIX and Windows listings, independent pins, directory
+  timeout cleanup, simulated remote errors, pool reset, password/pin preservation,
+  and config persistence/reload. It also checks that slow local directory reads
+  yield to other work, stale responses cannot replace newer results, and collapsed,
+  cached or failed directories do not automatically fetch again. Sidebar checks
+  execute the request handler and loading effects without a browser; they do not
+  exercise DOM rendering. The
   `link-core.sh` checks run Bash and npm against dependency-free temporary
   packages with npm offline mode enabled, covering stale builds, custom paths,
   re-linking, and failure handling. Your real core build and links are untouched.
@@ -530,6 +531,11 @@ runner; no additional test framework is required.
 Tests create and remove temporary fixtures without reading or writing your real
 `config.json`. The frontend build requires installed client dependencies and an
 existing `config.json` (use `config.example.json` for a fresh checkout).
+
+For browser verification, open a remote, expand a pin, then open the same folder
+in the main tree. The Network panel should show one listing per newly expanded
+directory and no new listing when cached children are reopened. Check **Retry**
+after a folder error and confirm that creating a file refreshes an expanded pin.
 
 ### Updating to new code
 
@@ -631,7 +637,7 @@ the sockets and middleware are initialized at startup.
 | New file / rename / upload all return errors | The backend wasn't restarted after pulling new code. `./stop.sh && ./start.sh`. |
 | API calls fail only from another site/tab | By default CORS allows the local client only (`localhost` / `127.0.0.1`). Open the app at its configured `clientPort`, or set `allowRemoteAccess: true` (and restart) to allow other machines — see [Allowing remote access](#allowing-remote-access). |
 | systemd unit fails on WSL | Confirm `/etc/wsl.conf` has `[boot]\nsystemd=true` and that you ran `wsl --shutdown` |
-| Remote root shows an inline error / red row | Read the error before changing credentials: connection, command, and filesystem failures can all appear here. The API returns 503 for connectivity, 400 for a bad/incomplete remote root. Check `host`/`user`/`password` for connection or authentication failures; see below for timeouts. |
+| Remote root or folder shows an inline error / red row | The API returns 503 for connection failures, 504 for a directory listing timeout, 404 for a missing folder, and 403 for denied access. Check `host`/`user`/`password` for connection or authentication failures; retry the affected folder for a listing failure. |
 | Remote reload times out while another SSH session still works | See [Remote refresh timeouts](#remote-refresh-timeouts). MD Reader uses its own SSH pool, and an exec timeout does not prove the SSH transport disconnected. |
 | A pinned folder is struck through | That folder no longer exists on the machine (renamed or deleted). Click **Unpin** on the row, then pin the new location. |
 | `Cannot find module '@ssh-manager/core'` | The symlink was pruned (usually by a recent `npm install`) or never created. Run `npm run link-core`. Only `type:"remote"` roots hit this. |
@@ -645,8 +651,10 @@ the sockets and middleware are initialized at startup.
 **Reload config & refresh** closes MD Reader's cached SSH pool, reloads root
 metadata, and fetches the visible trees. A separate SSH terminal uses a different
 connection, so it can remain healthy while MD Reader's connection or command
-fails. The linked core currently uses 15-second handshake and exec timeouts;
-these are not a deadline for the whole HTTP request.
+fails. The linked core uses a 15-second handshake timeout. Once a session is
+acquired, MD Reader gives home resolution, directory validation and listing a
+combined 15 seconds. This listing deadline returns **504** and closes the session;
+it does not include time spent acquiring the connection.
 
 Local tree walks use `fs.promises.readdir()` so slow Windows, OneDrive, or network
 directory reads do not block the Node.js event loop. Remote refresh does not
@@ -659,10 +667,12 @@ refresh with an older error. After updating, restart the backend to load the fix
 If a timeout recurs, capture the exact inline error and the failed request's
 status, response body, and duration in the browser's Network panel. Distinguish
 `POST /api/config/reload`, `GET /api/files/roots`, and
-`GET /api/files/root/:id`. For a tree request, measure connection acquisition,
-SFTP home resolution, and the remote `rg`/`find` command separately, and check for
-backend event-loop stalls before increasing a timeout. The API currently returns
-route errors in the response rather than logging each failed request.
+`GET /api/files/root/:id?rel=...`. Remote listing requests log `[remote-list]`
+with the root id, relative path, HTTP status and elapsed milliseconds in
+`logs/server.log`. Measure connection acquisition, SFTP home resolution and the
+single-directory read separately if delays recur. Earlier versions recursively
+scanned the whole remote home, which could exceed core's 15-second exec limit
+and incorrectly display `Remote unavailable` while SSH was healthy.
 
 ---
 
@@ -678,7 +688,7 @@ md-reader/
 │   ├── backend.test.js         # local operations and simulated remote behavior
 │   ├── config.test.js          # settings, passwords, pins and isolated persistence
 │   ├── link-core.test.js       # offline build/link regression fixtures
-│   ├── sidebar.test.js         # stale responses and visible-root loading
+│   ├── sidebar.test.js         # stale responses, independent pins and lazy directory loading
 │   └── core/compat.test.js     # actual core + backend, with a local SFTP adapter
 ├── systemd/
 │   ├── md-reader-server.service.template
@@ -693,7 +703,7 @@ md-reader/
 │   │   └── backend.js          # backend abstraction: LocalBackend (fs) + SftpBackend
 │   │                           #   (@ssh-manager/core, lazy-required); backendFor() picks one per root
 │   └── routes/
-│       ├── files.js            # GET /roots (metadata), GET /root/:id (one tree); POST /new, /rename; DELETE
+│       ├── files.js            # GET /roots, GET /root/:id?rel=...; POST /new, /rename; DELETE
 │       ├── content.js          # GET / PUT markdown body
 │       ├── upload.js           # POST multipart upload (multer)
 │       └── config.js           # POST /reload — re-read config.json + drop remote connections
@@ -702,7 +712,7 @@ md-reader/
         ├── App.jsx             # 3-column resizable layout + unsaved-change guard
         └── components/
             ├── Sidebar.jsx     # drives all mutations + toasts + config reload
-            ├── FileTree.jsx    # rows, ⋯ menu, drag-drop targets
+            ├── FileTree.jsx    # lazy directory expansion, rows, ⋯ menu, drag-drop targets
             ├── MarkdownViewer.jsx   # Read/Split/Edit + live preview + save
             ├── Editor.jsx      # CodeMirror, lazy-loaded (Read mode skips it)
             └── TocPanel.jsx    # nested collapsible TOC + scrollspy
@@ -722,12 +732,13 @@ re-validates `innerPath` against its own root's boundary before touching disk.
 `path` / `folder` values are tokens, not raw filesystem paths. Errors return a
 JSON `{ error }` with a meaningful status: **400** bad/malformed token or input,
 **403** path outside its root or permission denied, **404** unknown root id or
-missing file, **409** name clash, **503** remote unreachable.
+missing file, **409** name clash, **503** remote connection failure, **504** remote
+directory listing timeout.
 
 | Method | Path | Body / Query | Purpose |
 |---|---|---|---|
 | GET    | `/api/files/roots` | — | Root metadata only (id, name, type, host, pins) — no SSH, builds the tabs instantly |
-| GET    | `/api/files/root/:id` | — | Folder tree for **one** root (503 if that remote is unreachable; other roots unaffected) |
+| GET    | `/api/files/root/:id` | Optional `?rel=notes/subfolder` (remote only) | Local tree or immediate remote children; omit `rel` for the remote home |
 | POST   | `/api/files/new` | `{ folder, name }` | Create empty `.md` (auto-rename on conflict) |
 | POST   | `/api/files/rename` | `{ path, newName }` | Rename a file (409 on name clash) |
 | DELETE | `/api/files`  | `?path=...` | Delete one `.md`/`.mdx` (files only) |
